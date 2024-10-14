@@ -102,11 +102,10 @@ class Readout(nn.Module):
     """
     @nn.compact
     def __call__(self, nodes) -> jnp.ndarray:
+        nodes = jnp.hstack((nodes, nodes**2]))
         sumstats_mean = jnp.mean(nodes, axis=0)
-        #sumstats_var = jnp.mean(nodes ** 2, axis=0)
-        sumstats_global = nn.relu(nn.Dense(128)(jnp.concatenate([nodes, nodes**2])))
+        sumstats_global = nn.relu(nn.Dense(128)(nodes))
         sumstats_global = jnp.mean(nn.relu(nn.Dense(64)(nodes)), axis=0)
-        sumstats_global = nn.relu(nn.Dense(20)(sumstats_global))
         return jnp.concatenate([sumstats_mean, sumstats_global])
 
 class Mapping(nn.Module):
