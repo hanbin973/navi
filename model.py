@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 import flax
 from flax import linen as nn
-import jraph
 
 from typing import Any, Callable, Dict, List, Optional, Tuple, Sequence
 
@@ -52,6 +51,9 @@ def normalize_edges(edges,
     return edges / (edges_segment_sum[segment_ids] + 1e-5)
 
 class SpatialGraphConv(nn.Module):
+    """
+    Spatial graph convolution
+    """
     distance_max: float
     num_indicator_weight: int
     dim_mlp_hidden: int
@@ -92,7 +94,12 @@ class SpatialGraphConv(nn.Module):
         
         return nodes            
 
+
 class Readout(nn.Module):
+    """
+    Mean + DeepSets Readout
+    https://ieeexplore.ieee.org/document/8852103
+    """
     @nn.compact
     def __call__(self, nodes) -> jnp.ndarray:
         sumstats_mean = jnp.mean(nodes, axis=0)
@@ -103,6 +110,9 @@ class Readout(nn.Module):
         return jnp.concatenate([sumstats_mean, sumstats_global])
 
 class Mapping(nn.Module):
+    """
+    Just MLP
+    """
     dim_hiddens: Sequence[int]
     num_params: int
     @nn.compact
@@ -116,6 +126,9 @@ class Mapping(nn.Module):
         return theta
 
 class Model(nn.Module):
+    """
+    SpatialGraphConv -> Readout -> Mapping
+    """
     num_params: int
     num_spatial_conv: int
     distance_max: float
