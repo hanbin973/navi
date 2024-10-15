@@ -97,16 +97,16 @@ class SpatialGraphConv(nn.Module):
 
 class Readout(nn.Module):
     """
-    DeepSets + ResNet Readout
+    Mean + DeepSets Readout
     https://ieeexplore.ieee.org/document/8852103
     """
     @nn.compact
     def __call__(self, nodes) -> jnp.ndarray:
         nodes = jnp.hstack((nodes, nodes**2))
-        sumstats = jnp.mean(nodes, axis=0)
-        sumstats_resid = nn.relu(nn.Dense(128)(nodes))
-        sumstats_resid = jnp.mean(nn.relu(nn.Dense(sumstats.size)(sumstats_resid)), axis=0)
-        return sumstats + sumstats_resid # jnp.concatenate
+        sumstats_mean = jnp.mean(nodes, axis=0)
+        sumstats_global = nn.relu(nn.Dense(128)(nodes))
+        sumstats_global = jnp.mean(nn.relu(nn.Dense(64)(nodes)), axis=0)
+        return jnp.concatenate([sumstats_mean, sumstats_global])
 
 class Mapping(nn.Module):
     """
@@ -121,7 +121,7 @@ class Mapping(nn.Module):
             theta = nn.Dense(dim)(theta)
             theta = nn.relu(theta)
         theta = nn.Dense(self.num_params)(theta)
-        #theta = nn.relu(theta)
+        theta = nn.relu(theta)
         return theta
 
 class Model(nn.Module):
