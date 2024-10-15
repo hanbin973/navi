@@ -9,7 +9,7 @@ class IndicatorWeights(nn.Module):
     distance_max: float
     n_bins: int
     def __call__(self,
-                 distance: jnp.ndarray):
+                 distance: jnp.ndarray) -> jnp.ndarray:
         distance = distance.reshape(-1,1)
         bins = jnp.linspace(0, self.distance_max, self.n_bins + 1)
         indicator = (bins[None,:-1] - distance) * (distance - bins[None,1:])
@@ -20,7 +20,7 @@ class MLPWeights(nn.Module):
     dim_out: int
     @nn.compact
     def __call__(self,
-                 distance: jnp.ndarray):
+                 distance: jnp.ndarray) -> jnp.ndarray:
         distance = distance.reshape(-1,1)
         hidden = nn.Dense(self.dim_hidden)(distance)
         hidden = nn.relu(hidden)
@@ -36,14 +36,14 @@ class PowerDifference(nn.Module):
     @nn.compact
     def __call__(self,
                  x1: jnp.ndarray,
-                 x2: jnp.ndarray):
+                 x2: jnp.ndarray) -> jnp.ndarray:
         a, b = self.param('a', self.a_init(self.a), shape=1), self.param('b', self.b_init(self.b), shape=1)
         a, b = jnp.clip(a, min=0, max=1), jnp.abs(b)        
         return jnp.pow(jnp.abs(a * x1 - (1 - a) * x2), b)
 
-def normalize_edges(edges,
-                    segment_ids,
-                    num_segments):
+def normalize_edges(edges: jnp.ndarray,
+                    segment_ids: jnp.ndarray,
+                    num_segments:jnp.ndarray):
     edges_segment_sum = jax.ops.segment_sum(edges,
                                             segment_ids=segment_ids,
                                             num_segments=num_segments,
@@ -71,7 +71,7 @@ class SpatialGraphConv(nn.Module):
                  nodes: jnp.ndarray,
                  distance: jnp.ndarray,
                  receivers: jnp.ndarray,
-                 senders: jnp.ndarray):
+                 senders: jnp.ndarray) -> jnp.ndarray:
         
         # message-passing
         edge_receivers, edge_senders = nodes[receivers], nodes[senders]
@@ -101,7 +101,7 @@ class Readout(nn.Module):
     https://ieeexplore.ieee.org/document/8852103
     """
     @nn.compact
-    def __call__(self, nodes) -> jnp.ndarray:
+    def __call__(self, nodes: jnp.ndarray) -> jnp.ndarray:
         nodes = jnp.hstack((nodes, nodes**2))
         sumstats = jnp.mean(nodes, axis=0)
         sumstats_resid = nn.relu(nn.Dense(128)(nodes))
@@ -115,7 +115,7 @@ class Mapping(nn.Module):
     dim_hiddens: Sequence[int]
     num_params: int
     @nn.compact
-    def __call__(self, sumstats):
+    def __call__(self, sumstats: jnp.ndarray) -> jnp.ndarray:
         theta = sumstats
         for dim in self.dim_hiddens:
             theta = nn.Dense(dim)(theta)
@@ -124,7 +124,7 @@ class Mapping(nn.Module):
         #theta = nn.relu(theta)
         return theta
 
-class Model(nn.Module):
+class NAVI(nn.Module):
     """
     SpatialGraphConv -> Readout -> Mapping
     """
@@ -136,7 +136,11 @@ class Model(nn.Module):
     num_mlp_weight: int
     dim_mapping_hiddens: Sequence[int]
     @nn.compact
-    def __call__(self, traits, distance, receivers, senders):
+    def __call__(self, 
+                traits: jnp.ndarray, 
+                distance: jnp.ndarray, 
+                receivers: jnp.ndarray, 
+                senders: jnp.ndarray) -> jnp.ndarray:
         nodes = traits
         for _ in range(self.num_spatial_conv):
             nodes = SpatialGraphConv(self.distance_max,
