@@ -10,7 +10,8 @@ Once trained, it can instantaneously infer variance components of thousands of t
 <p align="center">
 	<img src="./navi.svg" alt="my alt text"/>
 	True parameter versus NAVI estimate across 5000 replicates. It takes 51ms on a single Nvidia A40 GPU.
-
+</p>
+<p align="center">
 	<img src="./reml_vs_navi.svg" alt="my alt text"/>
 	REML versus NAVI estimates across 1000 replicates. NAVI is as precise as REML.
 </p>
