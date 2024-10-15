@@ -1,6 +1,6 @@
 # NAVI (Neural Accelerated Variance-component Inference)
 
-NAVI (__N__eural __A__ccelerated __V__ariance-component __I__nference, _나비_) is a neural estimator for inferring variance components of complex traits in large scale biobanks.
+**N**eural **A**ccelerated **V**ariance-component **I**nference (NAVI, _나비_) is a neural estimator for inferring variance components of complex traits in large scale biobanks.
 
 NAVI trains a graph neural network using simulated data from succinct tree sequences.
 
