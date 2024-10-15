@@ -7,15 +7,11 @@ NAVI trains a graph neural network using simulated data from succinct tree seque
 Once trained, it can instantaneously infer variance components of thousands of traits within seconds on a single GPU.
 
 ## Examples
-<figure>
 	<center><img src="./navi.svg" alt="my alt text"/></center>
 	<center>True parameter versus NAVI estimate across 5000 replicates. It takes 51ms on a single Nvidia A40 GPU.</center>
-</figure>
 
-<figure>
 	<center><img src="./reml_vs_navi.svg" alt="my alt text"/></center>
 	<center>REML versus NAVI estimates across 1000 replicates. NAVI is as precise as REML.</center>
-</figure>
 
 
 ## Dependencies
