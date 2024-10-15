@@ -1,6 +1,6 @@
 # NAVI (Neural Accelerated Variance-component Inference)
 
-NAVI (Neural Accelerated Variance-component Inference, 나비) is a neural estimator for inferring variance components of complex traits in large scale biobanks.
+NAVI (Neural Accelerated Variance-component Inference, _나비_) is a neural estimator for inferring variance components of complex traits in large scale biobanks.
 
 NAVI trains a graph neural network using simulated data from succinct tree sequences.
 
@@ -13,7 +13,7 @@ NAVI's neural network uses a `jax` backend and is implemented in `flax`.
 pip install jax flax
 ```
 
-Training data is simulated from tree sequences
+Training data is simulated from succinct tree sequences implemented in `tskit`.
 ```bash
 pip install tskit
 ```
