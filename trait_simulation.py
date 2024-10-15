@@ -159,3 +159,43 @@ def genetic_value(ts, **kwargs):
         **kwargs,
     )
     return rv.run()
+
+class DataLoader():
+    def __init__(self,
+                 ts: tskit.TreeSequence,
+                 norm_factor: float,
+                 tau_range: list = [0.01, 1],
+                 sigma_range: list = [0.1, 1],
+                 batch_size: int = 200) -> (np.ndarray, np.ndarray):
+
+        self.ts = ts
+        self.batch_size = batch_size
+        self.norm_factor = norm_factor
+        self.tau_range = tau_range
+        self.sigma_range = sigma_range
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        traits = np.empty((self.batch_size, self.ts.num_individuals, 1))
+        params = np.empty((self.batch_size, 2))
+        for i in range(self.batch_size):
+            # sample params
+            tau = np.random.uniform(self.tau_range[0], self.tau_range[1])
+            sigma = np.random.uniform(self.sigma_range[0], self.sigma_range[1])
+
+            # sample trait
+            g = genetic_value(ts) / np.sqrt(self.norm_factor) * tau
+            e = np.random.normal(size=self.ts.num_samples) * sigma
+            y = g + e
+            factor = 1.5 * y.std()
+            y /= factor
+
+            # construct graph
+            traits[i] = y[:,None]
+            params[i] = np.asarray([tau, sigma]) / factor
+        return traits, params
+
+
+
