@@ -180,13 +180,14 @@ class DataLoader():
     def __next__(self):
         traits = np.empty((self.batch_size, self.ts.num_individuals, 1))
         params = np.empty((self.batch_size, 2))
+        factors = np.empty(self.batch_size)
         for i in range(self.batch_size):
             # sample params
             tau = np.random.uniform(self.tau_range[0], self.tau_range[1])
             sigma = np.random.uniform(self.sigma_range[0], self.sigma_range[1])
 
             # sample trait
-            g = genetic_value(ts) / np.sqrt(self.norm_factor) * tau
+            g = genetic_value(self.ts) / np.sqrt(self.norm_factor) * tau
             e = np.random.normal(size=self.ts.num_samples) * sigma
             y = g + e
             factor = 1.5 * y.std()
@@ -195,7 +196,9 @@ class DataLoader():
             # construct graph
             traits[i] = y[:,None]
             params[i] = np.asarray([tau, sigma]) / factor
-        return traits, params
+            factors[i] = factor
+
+        return traits, params, factors
 
 
 
