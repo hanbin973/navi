@@ -6,6 +6,8 @@ NAVI trains a graph neural network using simulated data from succinct tree seque
 
 Once trained, it can instantaneously infer variance components of thousands of traits within seconds on a single GPU.
 
+![](./navi.svg)
+
 ## Dependencies
 
 NAVI's neural network uses a `jax` backend and is implemented in `flax`.
