@@ -58,13 +58,14 @@ class SpatialGraphConv(nn.Module):
     num_indicator_weight: int
     dim_mlp_hidden: int
     num_mlp_weight: int
+    edges_padding: jnp.ndarray
 
     def setup(self):
         self.indicator_weight = IndicatorWeights(self.distance_max, self.num_indicator_weight)
         self.mlp_weight = MLPWeights(self.dim_mlp_hidden, self.num_mlp_weight)
         self.powerdiff = PowerDifference(.5, 2)
-        self.gamma_self = nn.Dense(self.num_indicator_weight + self.num_mlp_weight, use_bias=True)
-        self.gamma_gathered = nn.Dense(self.num_indicator_weight + self.num_mlp_weight, use_bias=False)
+        self.gamma_self = nn.Dense(self.num_indicator_weight + self.num_mlp_weight, use_bias=False)
+        self.gamma_gathered = nn.Dense(self.num_indicator_weight + self.num_mlp_weight)
         self.layernorm = nn.LayerNorm()
         
     def __call__(self,
@@ -81,7 +82,7 @@ class SpatialGraphConv(nn.Module):
         mlp_weights = normalize_edges(self.mlp_weight(distance),
                                       segment_ids=receivers,
                                       num_segments=nodes.shape[0])
-        weights = jnp.hstack((indicator_weights, mlp_weights)) 
+        weights = jnp.hstack((indicator_weights, mlp_weights)) * self.edges_padding.reshape(-1,1)
         edge_pds = self.powerdiff(edge_receivers, edge_senders)
         nodes_gathered = jax.ops.segment_sum(weights * edge_pds,
                                              segment_ids=receivers,
@@ -94,18 +95,20 @@ class SpatialGraphConv(nn.Module):
         
         return nodes            
 
-
 class Readout(nn.Module):
     """
     DeepSets + ResNet Readout
     https://ieeexplore.ieee.org/document/8852103
     """
+    nodes_padding: jnp.ndarray
     @nn.compact
     def __call__(self, nodes: jnp.ndarray) -> jnp.ndarray:
+        nodes = nodes * self.nodes_padding.reshape(-1,1)
         nodes = jnp.hstack((nodes, nodes**2))
-        sumstats = jnp.mean(nodes, axis=0)
+        sumstats = jnp.sum(nodes, axis=0) / jnp.sum(self.nodes_padding)
         sumstats_resid = nn.relu(nn.Dense(128)(nodes))
-        sumstats_resid = jnp.mean(nn.relu(nn.Dense(sumstats.size)(sumstats_resid)), axis=0)
+        sumstats_resid = nn.relu(nn.Dense(sumstats.size)(sumstats_resid))
+        sumstats_resid = jnp.sum(sumstats_resid, axis=0) / jnp.sum(self.nodes_padding)
         return sumstats + sumstats_resid # jnp.concatenate
 
 class Mapping(nn.Module):
@@ -121,7 +124,7 @@ class Mapping(nn.Module):
             theta = nn.Dense(dim)(theta)
             theta = nn.relu(theta)
         theta = nn.Dense(self.num_params)(theta)
-        #theta = nn.relu(theta)
+        theta = nn.relu(theta)
         return theta
 
 class NAVI(nn.Module):
@@ -140,14 +143,17 @@ class NAVI(nn.Module):
                 traits: jnp.ndarray, 
                 distance: jnp.ndarray, 
                 receivers: jnp.ndarray, 
-                senders: jnp.ndarray) -> jnp.ndarray:
+                senders: jnp.ndarray,
+                nodes_padding: jnp.ndarray,
+                edges_padding: jnp.ndarray) -> jnp.ndarray:
         nodes = traits
         for _ in range(self.num_spatial_conv):
             nodes = SpatialGraphConv(self.distance_max,
                                     self.num_indicator_weight,
                                     self.dim_mlp_hidden,
-                                    self.num_mlp_weight
+                                    self.num_mlp_weight,
+                                    edges_padding
                                     )(nodes, distance, receivers, senders)
-        readout = Readout()(nodes)
+        readout = Readout(nodes_padding)(nodes)
         params = Mapping(self.dim_mapping_hiddens, self.num_params)(readout)
         return params 
