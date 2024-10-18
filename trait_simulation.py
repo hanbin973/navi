@@ -6,6 +6,8 @@ import numba
 from numba import i4, f8
 from numba.experimental import jitclass
 
+import jax.numpy as jnp
+
 spec = [
         ('sample_weights', f8[:]),
         ('parent', i4[:]),
@@ -217,6 +219,7 @@ class DataLoader():
             if self.dynamic_size:
                 # probability to keep nodes
                 p_keep = np.random.uniform(*self.dynamic_range)
+                p_keep = np.clip(p_keep, a_min=None, a_max=1)
                 # sample nodes to keep
                 nodes_keep = np.random.binomial(1, p_keep, size=self.num_nodes)
                 nodes_padding[i] = nodes_keep
@@ -225,5 +228,13 @@ class DataLoader():
                 receivers_keep = np.isin(self.receivers, nodes_keep_idx).astype(int)
                 senders_keep = np.isin(self.senders, nodes_keep_idx).astype(int)
                 edges_padding[i] = receivers_keep * senders_keep
+
+        traits, params, factors, nodes_padding, edges_padding = (
+                jnp.array(traits, dtype=jnp.float16),
+                jnp.array(params, dtype=jnp.float16),
+                jnp.array(factors, dtype=jnp.float16),
+                jnp.array(nodes_padding),
+                jnp.array(edges_padding)
+                )
 
         return traits, params, factors, nodes_padding, edges_padding

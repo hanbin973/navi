@@ -66,7 +66,6 @@ class SpatialGraphConv(nn.Module):
         self.powerdiff = PowerDifference(.5, 2)
         self.gamma_self = nn.Dense(self.num_indicator_weight + self.num_mlp_weight, use_bias=False)
         self.gamma_gathered = nn.Dense(self.num_indicator_weight + self.num_mlp_weight)
-        self.layernorm = nn.LayerNorm()
         
     def __call__(self,
                  nodes: jnp.ndarray,
@@ -75,7 +74,6 @@ class SpatialGraphConv(nn.Module):
                  senders: jnp.ndarray) -> jnp.ndarray:
         
         # message-passing
-        edge_receivers, edge_senders = nodes[receivers], nodes[senders]
         indicator_weights = normalize_edges(self.indicator_weight(distance),
                                             segment_ids=receivers,
                                             num_segments=nodes.shape[0])
@@ -83,7 +81,7 @@ class SpatialGraphConv(nn.Module):
                                       segment_ids=receivers,
                                       num_segments=nodes.shape[0])
         weights = jnp.hstack((indicator_weights, mlp_weights)) * self.edges_padding.reshape(-1,1)
-        edge_pds = self.powerdiff(edge_receivers, edge_senders)
+        edge_pds = self.powerdiff(nodes[receivers], nodes[senders])
         nodes_gathered = jax.ops.segment_sum(weights * edge_pds,
                                              segment_ids=receivers,
                                              num_segments=nodes.shape[0],
