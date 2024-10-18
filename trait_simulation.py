@@ -1,5 +1,7 @@
 import tskit
 import numpy as np
+import scipy.sparse as sparse
+
 import numba
 from numba import i4, f8
 from numba.experimental import jitclass
@@ -164,15 +166,26 @@ class DataLoader():
     def __init__(self,
                  ts: tskit.TreeSequence,
                  norm_factor: float,
+                 receivers: np.ndarray,
+                 senders: np.ndarray,
                  tau_range: list = [0.01, 1],
                  sigma_range: list = [0.1, 1],
-                 batch_size: int = 200) -> (np.ndarray, np.ndarray):
+                 batch_size: int = 200,
+                 dynamic_size: bool = False,
+                 dynamic_range: list = [0.5, 1],
+                 ) -> (np.ndarray, np.ndarray):
 
         self.ts = ts
-        self.batch_size = batch_size
         self.norm_factor = norm_factor
+        self.receivers = receivers
+        self.senders = senders
         self.tau_range = tau_range
         self.sigma_range = sigma_range
+        self.batch_size = batch_size
+        self.dynamic_size = dynamic_size
+        self.dynamic_range = dynamic_range
+        self.num_nodes = ts.num_individuals
+        self.num_edges = receivers.size
 
     def __iter__(self):
         return self
@@ -181,10 +194,12 @@ class DataLoader():
         traits = np.empty((self.batch_size, self.ts.num_individuals, 1))
         params = np.empty((self.batch_size, 2))
         factors = np.empty(self.batch_size)
+        nodes_padding = np.ones((self.batch_size, self.num_nodes)) 
+        edges_padding = np.ones((self.batch_size, self.num_edges))
         for i in range(self.batch_size):
             # sample params
-            tau = np.random.uniform(self.tau_range[0], self.tau_range[1])
-            sigma = np.random.uniform(self.sigma_range[0], self.sigma_range[1])
+            tau = np.random.uniform(*self.tau_range)
+            sigma = np.random.uniform(*self.sigma_range)
 
             # sample trait
             g = genetic_value(self.ts) / np.sqrt(self.norm_factor) * tau
@@ -198,7 +213,17 @@ class DataLoader():
             params[i] = np.asarray([tau, sigma]) / factor
             factors[i] = factor
 
-        return traits, params, factors
+            # paddings
+            if self.dynamic_size:
+                # probability to keep nodes
+                p_keep = np.random.uniform(*self.dynamic_range)
+                # sample nodes to keep
+                nodes_keep = np.random.binomial(1, p_keep, size=self.num_nodes)
+                nodes_padding[i] = nodes_keep
+                # pick edges
+                nodes_keep_idx = np.arange(self.num_nodes)[nodes_keep.astype(bool)]
+                receivers_keep = np.isin(self.receivers, nodes_keep_idx).astype(int)
+                senders_keep = np.isin(self.senders, nodes_keep_idx).astype(int)
+                edges_padding[i] = receivers_keep * senders_keep
 
-
-
+        return traits, params, factors, nodes_padding, edges_padding
