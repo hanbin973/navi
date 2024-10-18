@@ -172,6 +172,7 @@ class DataLoader():
                  sigma_range: list = [0.1, 1],
                  batch_size: int = 200,
                  dynamic_size: bool = False,
+                 dynamic_range: list = [0.5, 1],
                  ) -> (np.ndarray, np.ndarray):
 
         self.ts = ts
@@ -182,6 +183,7 @@ class DataLoader():
         self.sigma_range = sigma_range
         self.batch_size = batch_size
         self.dynamic_size = dynamic_size
+        self.dynamic_range = dynamic_range
         self.num_nodes = ts.num_individuals
         self.num_edges = receivers.size
 
@@ -196,8 +198,8 @@ class DataLoader():
         edges_padding = np.ones((self.batch_size, self.num_edges))
         for i in range(self.batch_size):
             # sample params
-            tau = np.random.uniform(self.tau_range[0], self.tau_range[1])
-            sigma = np.random.uniform(self.sigma_range[0], self.sigma_range[1])
+            tau = np.random.uniform(*self.tau_range)
+            sigma = np.random.uniform(*self.sigma_range)
 
             # sample trait
             g = genetic_value(self.ts) / np.sqrt(self.norm_factor) * tau
@@ -214,7 +216,7 @@ class DataLoader():
             # paddings
             if self.dynamic_size:
                 # probability to keep nodes
-                p_keep = np.random.uniform(low=0.5, high=1)
+                p_keep = np.random.uniform(*self.dynamic_range)
                 # sample nodes to keep
                 nodes_keep = np.random.binomial(1, p_keep, size=self.num_nodes)
                 nodes_padding[i] = nodes_keep
@@ -225,6 +227,3 @@ class DataLoader():
                 edges_padding[i] = receivers_keep * senders_keep
 
         return traits, params, factors, nodes_padding, edges_padding
-
-
-
