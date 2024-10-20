@@ -6,7 +6,7 @@ from flax.training import train_state
 
 from typing import Any, Callable, Dict, List, Optional, Tuple, Sequence
 
-from trait_simulation import DataLoader
+from simulation import DataLoader
 
 @jax.jit
 def loss_fn(state: train_state.TrainState,
@@ -83,6 +83,7 @@ class TrainOnTheFly:
                                          edges_padding)
             if epoch % num_refresh == 0:
                 traits, vcs, _, nodes_padding, edges_padding = next(data_loader)
+            if epoch % num_refresh == 1:
                 if verbose:
                     print('Epoch: %d, Loss: %.8f' % (epoch, loss_val)) 
 

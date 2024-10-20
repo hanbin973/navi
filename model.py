@@ -5,13 +5,15 @@ from flax import linen as nn
 
 from typing import Any, Callable, Dict, List, Optional, Tuple, Sequence
 
+dtype = jnp.bfloat16
+
 class IndicatorWeights(nn.Module):
     distance_max: float
     n_bins: int
     def __call__(self,
                  distance: jnp.ndarray) -> jnp.ndarray:
         distance = distance.reshape(-1,1)
-        bins = jnp.linspace(0, self.distance_max, self.n_bins + 1)
+        bins = jnp.linspace(0, self.distance_max, self.n_bins + 1, dtype=dtype)
         indicator = (bins[None,:-1] - distance) * (distance - bins[None,1:])
         return jnp.heaviside(indicator, 0)
 
@@ -22,22 +24,24 @@ class MLPWeights(nn.Module):
     def __call__(self,
                  distance: jnp.ndarray) -> jnp.ndarray:
         distance = distance.reshape(-1,1)
-        hidden = nn.Dense(self.dim_hidden)(distance)
+        hidden = nn.Dense(self.dim_hidden, dtype=dtype)(distance)
+        hideen = nn.LayerNorm()(hidden)
         hidden = nn.relu(hidden)
-        hidden = nn.Dense(self.dim_out)(hidden)
+        hidden = nn.Dense(self.dim_out, dtype=dtype)(hidden)
+        hideen = nn.LayerNorm()(hidden)
         out = nn.relu(hidden)
         return out
 
-class PowerDifference(nn.Module):
-    a: float
-    b: float
+class PowerDifference(nn.Module): # check
+    a: dtype
+    b: dtype
     a_init: Callable = nn.initializers.constant
     b_init: Callable = nn.initializers.constant
     @nn.compact
     def __call__(self,
                  x1: jnp.ndarray,
                  x2: jnp.ndarray) -> jnp.ndarray:
-        a, b = self.param('a', self.a_init(self.a), shape=1), self.param('b', self.b_init(self.b), shape=1)
+        a, b = self.param('a', self.a_init(self.a, dtype=dtype), shape=1), self.param('b', self.b_init(self.b, dtype=dtype), shape=1)
         a, b = jnp.clip(a, min=0, max=1), jnp.abs(b)        
         return jnp.pow(jnp.abs(a * x1 - (1 - a) * x2), b)
 
@@ -64,8 +68,8 @@ class SpatialGraphConv(nn.Module):
         self.indicator_weight = IndicatorWeights(self.distance_max, self.num_indicator_weight)
         self.mlp_weight = MLPWeights(self.dim_mlp_hidden, self.num_mlp_weight)
         self.powerdiff = PowerDifference(.5, 2)
-        self.gamma_self = nn.Dense(self.num_indicator_weight + self.num_mlp_weight, use_bias=False)
-        self.gamma_gathered = nn.Dense(self.num_indicator_weight + self.num_mlp_weight)
+        self.gamma_self = nn.Dense(self.num_indicator_weight + self.num_mlp_weight, use_bias=False, dtype=dtype)
+        self.gamma_gathered = nn.Dense(self.num_indicator_weight + self.num_mlp_weight, dtype=dtype)
         
     def __call__(self,
                  nodes: jnp.ndarray,
@@ -86,11 +90,9 @@ class SpatialGraphConv(nn.Module):
                                              segment_ids=receivers,
                                              num_segments=nodes.shape[0],
                                              indices_are_sorted=True)
-
         # convolution
         nodes = self.gamma_self(nodes) + self.gamma_gathered(nodes_gathered)
         nodes = nn.relu(nodes)
-        
         return nodes            
 
 class Readout(nn.Module):
@@ -104,8 +106,8 @@ class Readout(nn.Module):
         nodes = nodes * self.nodes_padding.reshape(-1,1)
         nodes = jnp.hstack((nodes, nodes**2))
         sumstats = jnp.sum(nodes, axis=0) / jnp.sum(self.nodes_padding)
-        sumstats_resid = nn.relu(nn.Dense(128)(nodes))
-        sumstats_resid = nn.relu(nn.Dense(sumstats.size)(sumstats_resid))
+        sumstats_resid = nn.relu(nn.Dense(128, dtype=dtype)(nodes))
+        sumstats_resid = nn.relu(nn.Dense(sumstats.size, dtype=dtype)(sumstats_resid))
         sumstats_resid = jnp.sum(sumstats_resid, axis=0) / jnp.sum(self.nodes_padding)
         return sumstats + sumstats_resid # jnp.concatenate
 
@@ -119,9 +121,9 @@ class Mapping(nn.Module):
     def __call__(self, sumstats: jnp.ndarray) -> jnp.ndarray:
         theta = sumstats
         for dim in self.dim_hiddens:
-            theta = nn.Dense(dim)(theta)
+            theta = nn.Dense(dim, dtype=dtype)(theta)
             theta = nn.relu(theta)
-        theta = nn.Dense(self.num_params)(theta)
+        theta = nn.Dense(self.num_params, dtype=dtype)(theta)
         theta = nn.relu(theta)
         return theta
 
@@ -131,7 +133,7 @@ class NAVI(nn.Module):
     """
     num_params: int
     num_spatial_conv: int
-    distance_max: float
+    distance_max: dtype
     num_indicator_weight: int
     dim_mlp_hidden: int
     num_mlp_weight: int
@@ -154,4 +156,5 @@ class NAVI(nn.Module):
                                     )(nodes, distance, receivers, senders)
         readout = Readout(nodes_padding)(nodes)
         params = Mapping(self.dim_mapping_hiddens, self.num_params)(readout)
+        print(params.dtype)
         return params 

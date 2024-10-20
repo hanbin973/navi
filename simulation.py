@@ -8,6 +8,8 @@ from numba.experimental import jitclass
 
 import jax.numpy as jnp
 
+dtype = jnp.bfloat16
+
 spec = [
         ('sample_weights', f8[:]),
         ('parent', i4[:]),
@@ -148,7 +150,11 @@ class TraitVector:
             out[out_i] = self.stack[i]
         return out
 
-def genetic_value(ts, **kwargs):
+
+
+def genetic_value(ts, ij, **kwargs):
+    def bincount_fn(w):
+        return np.bincount(sample_individuals, w)
     rv = TraitVector(
         ts.num_nodes,
         samples=ts.samples(),
@@ -162,7 +168,13 @@ def genetic_value(ts, **kwargs):
         sequence_length=ts.sequence_length,
         **kwargs,
     )
-    return rv.run()
+    g_nodes = rv.run()
+    #samples, sample_individuals = ij[:,0], ij[:,1]
+    #g_individuals = np.apply_along_axis(bincount_fn, axis=0, arr=g_nodes)
+    ploidy = ts.individual(0).nodes.size
+    g_individuals = g_nodes.reshape(-1, ploidy).sum(axis=1)
+    
+    return g_individuals
 
 class DataLoader():
     def __init__(self,
@@ -173,8 +185,7 @@ class DataLoader():
                  tau_range: list = [0.01, 1],
                  sigma_range: list = [0.1, 1],
                  batch_size: int = 200,
-                 dynamic_size: bool = False,
-                 dynamic_range: list = [0.5, 1],
+                 missing_range: list = [0.5, 1],
                  ) -> (np.ndarray, np.ndarray):
 
         self.ts = ts
@@ -184,10 +195,19 @@ class DataLoader():
         self.tau_range = tau_range
         self.sigma_range = sigma_range
         self.batch_size = batch_size
-        self.dynamic_size = dynamic_size
-        self.dynamic_range = dynamic_range
+        self.missing_range = missing_range
         self.num_nodes = ts.num_individuals
         self.num_edges = receivers.size
+
+        individuals = [i.id for i in ts.individuals()] 
+        self.ij = np.vstack([
+            [n,k]
+            for k, i in enumerate(individuals)
+            for n in ts.individual(i).nodes
+            ])
+        ploidy = ts.individual(0).nodes.size
+        self.ploidy = ploidy
+
 
     def __iter__(self):
         return self
@@ -204,8 +224,8 @@ class DataLoader():
             sigma = np.random.uniform(*self.sigma_range)
 
             # sample trait
-            g = genetic_value(self.ts) / np.sqrt(self.norm_factor) * tau
-            e = np.random.normal(size=self.ts.num_samples) * sigma
+            g = genetic_value(self.ts, self.ij) / np.sqrt(self.norm_factor) * tau
+            e = np.random.normal(size=self.ts.num_individuals) * sigma
             y = g + e
             factor = 1.5 * y.std()
             y /= factor
@@ -216,25 +236,24 @@ class DataLoader():
             factors[i] = factor
 
             # paddings
-            if self.dynamic_size:
-                # probability to keep nodes
-                p_keep = np.random.uniform(*self.dynamic_range)
-                p_keep = np.clip(p_keep, a_min=None, a_max=1)
-                # sample nodes to keep
-                nodes_keep = np.random.binomial(1, p_keep, size=self.num_nodes)
-                nodes_padding[i] = nodes_keep
-                # pick edges
-                nodes_keep_idx = np.arange(self.num_nodes)[nodes_keep.astype(bool)]
-                receivers_keep = np.isin(self.receivers, nodes_keep_idx).astype(int)
-                senders_keep = np.isin(self.senders, nodes_keep_idx).astype(int)
-                edges_padding[i] = receivers_keep * senders_keep
+            # probability to keep nodes
+            p_keep = np.random.uniform(*self.missing_range)
+            p_keep = np.clip(p_keep, a_min=None, a_max=1)
+            # sample nodes to keep
+            nodes_keep = np.random.binomial(1, p_keep, size=self.num_nodes)
+            nodes_padding[i] = nodes_keep
+            # pick edges
+            nodes_keep_idx = np.arange(self.num_nodes)[nodes_keep.astype(bool)]
+            receivers_keep = np.isin(self.receivers, nodes_keep_idx).astype(int)
+            senders_keep = np.isin(self.senders, nodes_keep_idx).astype(int)
+            edges_padding[i] = receivers_keep * senders_keep
 
         traits, params, factors, nodes_padding, edges_padding = (
-                jnp.array(traits, dtype=jnp.float16),
-                jnp.array(params, dtype=jnp.float16),
-                jnp.array(factors, dtype=jnp.float16),
-                jnp.array(nodes_padding),
-                jnp.array(edges_padding)
+                jnp.array(traits, dtype=dtype),
+                jnp.array(params, dtype=dtype),
+                jnp.array(factors, dtype=dtype),
+                jnp.array(nodes_padding, dtype=dtype),
+                jnp.array(edges_padding, dtype=dtype)
                 )
 
         return traits, params, factors, nodes_padding, edges_padding
