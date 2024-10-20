@@ -25,11 +25,11 @@ class MLPWeights(nn.Module):
                  distance: jnp.ndarray) -> jnp.ndarray:
         distance = distance.reshape(-1,1)
         hidden = nn.Dense(self.dim_hidden, dtype=dtype)(distance)
-        hideen = nn.LayerNorm()(hidden)
+        #hideen = nn.LayerNorm()(hidden)
         hidden = nn.relu(hidden)
         hidden = nn.Dense(self.dim_out, dtype=dtype)(hidden)
-        hideen = nn.LayerNorm()(hidden)
-        out = nn.relu(hidden)
+        #hideen = nn.LayerNorm()(hidden)
+        out = hidden #nn.relu(hidden)
         return out
 
 class PowerDifference(nn.Module): # check
@@ -47,12 +47,29 @@ class PowerDifference(nn.Module): # check
 
 def normalize_edges(edges: jnp.ndarray,
                     segment_ids: jnp.ndarray,
-                    num_segments:jnp.ndarray):
-    edges_segment_sum = jax.ops.segment_sum(edges,
-                                            segment_ids=segment_ids,
-                                            num_segments=num_segments,
-                                            indices_are_sorted=True)
-    return edges / (edges_segment_sum[segment_ids] + 1e-5)
+                    num_segments: jnp.ndarray):
+    sums = jax.ops.segment_sum(edges,
+                               segment_ids=segment_ids,
+                               num_segments=num_segments,
+                               indices_are_sorted=True)
+    return edges / (sums[segment_ids] + 1e-5)
+
+def segment_softmax(edges: jnp.ndarray,
+                    segment_ids: jnp.ndarray,
+                    num_segments: jnp.ndarray):
+    maxs = jax.ops.segment_max(edges,
+                               segment_ids=segment_ids,
+                               num_segments=num_segments,
+                               indices_are_sorted=True)
+    edges = edges - maxs[segment_ids]
+    edges = jnp.exp(edges)
+    sums = jax.ops.segment_sum(edges,
+                               segment_ids=segment_ids,
+                               num_segments=num_segments,
+                               indices_are_sorted=True)
+    return edges / sums[segment_ids]
+
+
 
 class SpatialGraphConv(nn.Module):
     """
@@ -81,7 +98,10 @@ class SpatialGraphConv(nn.Module):
         indicator_weights = normalize_edges(self.indicator_weight(distance),
                                             segment_ids=receivers,
                                             num_segments=nodes.shape[0])
-        mlp_weights = normalize_edges(self.mlp_weight(distance),
+        #mlp_weights = normalize_edges(self.mlp_weight(distance),
+        #                              segment_ids=receivers,
+        #                              num_segments=nodes.shape[0])
+        mlp_weights = segment_softmax(self.mlp_weight(distance),
                                       segment_ids=receivers,
                                       num_segments=nodes.shape[0])
         weights = jnp.hstack((indicator_weights, mlp_weights)) * self.edges_padding.reshape(-1,1)
