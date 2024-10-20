@@ -54,7 +54,7 @@ def normalize_edges(edges: jnp.ndarray,
                                indices_are_sorted=True)
     return edges / (sums[segment_ids] + 1e-5)
 
-def segment_softmax(edges: jnp.ndarray,
+def softmax_edges(edges: jnp.ndarray,
                     segment_ids: jnp.ndarray,
                     num_segments: jnp.ndarray):
     maxs = jax.ops.segment_max(edges,
@@ -68,8 +68,6 @@ def segment_softmax(edges: jnp.ndarray,
                                num_segments=num_segments,
                                indices_are_sorted=True)
     return edges / sums[segment_ids]
-
-
 
 class SpatialGraphConv(nn.Module):
     """
@@ -101,9 +99,9 @@ class SpatialGraphConv(nn.Module):
         #mlp_weights = normalize_edges(self.mlp_weight(distance),
         #                              segment_ids=receivers,
         #                              num_segments=nodes.shape[0])
-        mlp_weights = segment_softmax(self.mlp_weight(distance),
-                                      segment_ids=receivers,
-                                      num_segments=nodes.shape[0])
+        mlp_weights = softmax_edges(self.mlp_weight(distance),
+                                    segment_ids=receivers,
+                                    num_segments=nodes.shape[0])
         weights = jnp.hstack((indicator_weights, mlp_weights)) * self.edges_padding.reshape(-1,1)
         edge_pds = self.powerdiff(nodes[receivers], nodes[senders])
         nodes_gathered = jax.ops.segment_sum(weights * edge_pds,
