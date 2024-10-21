@@ -42,7 +42,7 @@ class PowerDifference(nn.Module): # check
                  x1: jnp.ndarray,
                  x2: jnp.ndarray) -> jnp.ndarray:
         a, b = self.param('a', self.a_init(self.a, dtype=dtype), shape=1), self.param('b', self.b_init(self.b, dtype=dtype), shape=1)
-        a, b = jnp.clip(a, min=0, max=1), jnp.abs(b)        
+        a, b = jnp.clip(a, min=0, max=1), nn.relu(b)        
         return jnp.pow(jnp.abs(a * x1 - (1 - a) * x2), b)
 
 def normalize_edges(edges: jnp.ndarray,
