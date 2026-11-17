@@ -7,7 +7,8 @@ confirm unresolved project and cluster settings before relying on them.
 
 - Environment, dependencies, or uv: read `harness/environment.md`.
 - Editing and verification: read `harness/development.md`.
-- JAX/Equinox behavior or numerical tests: read `harness/numerical-conventions.md`.
+- JAX/Equinox behavior or numerical tests: use the `jax-equinox-numerics` skill
+  when available.
 - Slurm or compute resources: read `harness/cluster.md` before running jobs.
 
 Use available JAX/Equinox skills when relevant. Project and site instructions
