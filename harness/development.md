@@ -2,7 +2,7 @@
 
 ## Target checks
 
-Once Ruff and pytest are added to the uv environment, the intended fast checks are:
+The intended fast checks are:
 
 ```sh
 uv run --locked ruff check .
@@ -10,8 +10,8 @@ uv run --locked ruff format --check .
 uv run --locked pytest
 ```
 
-These commands are not yet operational: dependencies, a lockfile, and a test
-suite are still to be created. Keep checks proportional to the change. Add
+There is no test suite yet; pytest will report that no tests were collected.
+Keep checks proportional to the change. Add
 meaningful tests for observable behavior and numerical contracts as code grows.
 
 For CPU and GPU execution checks, use `harness/slurm/cpu-debug.sbatch` and

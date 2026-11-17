@@ -1,0 +1,26 @@
+# Repository map
+
+Use this map to locate responsibilities; inspect the relevant files before
+changing them. The application architecture has not yet been established.
+
+## Project configuration
+
+- `pyproject.toml` — project metadata, dependency requirements, and tool
+  configuration.
+- `uv.lock` — uv-resolved dependency versions; update through uv.
+- `.python-version` — Python version selected for the project.
+- `main.py` — uv starter entry point, not yet application functionality.
+
+## Agent and execution harness
+
+- `AGENTS.md` — repository-wide agent instructions and task routing.
+- `harness/environment.md` — uv environment and dependency guidance.
+- `harness/development.md` — development checks and verification expectations.
+- `harness/cluster.md` — cluster rules, job prerequisites, and template routing.
+- `harness/slurm/` — draft CPU/GPU batch templates and school reference example.
+- `harness/smoke.py` — small JAX/Equinox device execution check used by the
+  Slurm templates.
+
+## Application code and tests
+
+Locations and responsibilities remain to be defined as the project develops.

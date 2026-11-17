@@ -5,6 +5,7 @@ confirm unresolved project and cluster settings before relying on them.
 
 ## Route by task
 
+- Repository structure and component roles: read `harness/repository-map.md`.
 - Environment, dependencies, or uv: read `harness/environment.md`.
 - Editing and verification: read `harness/development.md`.
 - JAX/Equinox behavior or numerical tests: use the `jax-equinox-numerics` skill
@@ -22,3 +23,6 @@ take precedence over generic examples. Do not infer unrecorded cluster settings.
   filesystem access and scheduler polling.
 - Run checks relevant to the change and report what passed or could not run.
 - Update the corresponding harness file when a project convention changes.
+- Update the repository map when an important component is added, moved,
+  removed, or changes responsibility. Verify relevant files before editing;
+  the map is an orientation aid and may be stale.
