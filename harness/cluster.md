@@ -2,8 +2,9 @@
 
 ## Scope and safety
 
-- Use the `debug` partition for the small CPU smoke job and `spgpu` for the GPU
-  smoke job. The scripts in `harness/slurm/` are draft templates, not verified
+- Use the `debug` partition for the small CPU smoke job. The GPU smoke job
+  can run on `spgpu` or `gpu_mig40`. The scripts in `harness/slurm/` are
+  draft templates, not verified
   cluster configurations.
 - Use Slurm account `jonth0` and notification address `hblee@umich.edu`.
   The templates request email on job start and end, following the school example.

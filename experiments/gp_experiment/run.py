@@ -41,7 +41,7 @@ def make_train_step(optimizer, query_count):
         )
         updates, state = optimizer.update(gradients, state)
         model = eqx.apply_updates(model, updates)
-        return model, state, jnp.isfinite(value) & finite
+        return model, state, value, jnp.isfinite(value) & finite
 
     return train_step
 
@@ -109,34 +109,39 @@ def run(args):
             model, context_rows, ids, draw_episode(key, context_rows, query_count)
         )
 
+    validation_keys = [
+        jax.random.fold_in(validation, index)
+        for index in range(args.validation_episodes)
+    ]
+
+    def evaluate_validation(model, step):
+        mse = float(
+            np.mean(
+                [
+                    float(validation_loss(model, key, context_rows, ids))
+                    for key in validation_keys
+                ]
+            )
+        )
+        if not np.isfinite(mse):
+            raise ValueError(f"Nonfinite validation MSE at step {step}")
+        return mse
+
     checkpoint = args.output_dir / "best.eqx"
     best_loss = np.inf
     best_step = None
-    history = []
+    history = [{"step": 0, "mse": evaluate_validation(model, 0)}]
+    training_history = []
     for step in range(1, args.steps + 1):
-        model, state, finite = train_step(
+        model, state, training_mse, finite = train_step(
             model, state, jax.random.fold_in(train, step), context_rows, ids
         )
-        if not bool(finite):
+        training_mse, finite = jax.device_get((training_mse, finite))
+        if not finite:
             raise ValueError(f"Nonfinite training loss or gradient at update {step}")
+        training_history.append({"step": step, "mse": float(training_mse)})
         if step % args.validate_every == 0 or step == args.steps:
-            validation_mse = float(
-                np.mean(
-                    [
-                        float(
-                            validation_loss(
-                                model,
-                                jax.random.fold_in(validation, index),
-                                context_rows,
-                                ids,
-                            )
-                        )
-                        for index in range(args.validation_episodes)
-                    ]
-                )
-            )
-            if not np.isfinite(validation_mse):
-                raise ValueError(f"Nonfinite validation MSE at update {step}")
+            validation_mse = evaluate_validation(model, step)
             history.append({"step": step, "mse": validation_mse})
             if validation_mse < best_loss:
                 best_loss, best_step = validation_mse, step
@@ -171,6 +176,7 @@ def run(args):
         "device": str(context_rows.device),
         "wall_seconds": time.perf_counter() - start,
         "validation_history": history,
+        "training_history": training_history,
         "selected_step": best_step,
     }
     for name, payload in (

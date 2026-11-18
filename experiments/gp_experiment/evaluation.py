@@ -33,6 +33,12 @@ def oracle_predict(context_rows, context_gram, episode, index):
     return prediction
 
 
+def pearson_r(targets, predictions):
+    if np.ptp(targets) == 0 or np.ptp(predictions) == 0:
+        return None
+    return float(np.corrcoef(targets, predictions)[0, 1])
+
+
 def episode_metrics(index, episode, prediction, oracle):
     targets = np.asarray(episode.targets, dtype=np.float64)
     prediction = np.asarray(prediction, dtype=np.float64)
@@ -52,6 +58,8 @@ def episode_metrics(index, episode, prediction, oracle):
         "heritability": genetic / (genetic + residual),
         "navi_mse": navi_mse,
         "blup_mse": blup_mse,
+        "navi_pearson_r": pearson_r(targets, prediction),
+        "blup_pearson_r": pearson_r(targets, oracle),
         "mse_gap": navi_mse - blup_mse,
         "prediction_disagreement": disagreement,
     }
@@ -80,6 +88,15 @@ def summarize(rows, bootstrap_key):
         field: float(np.mean([row[field] for row in rows]))
         for field in ("navi_mse", "blup_mse", "mse_gap", "prediction_disagreement")
     }
+    correlations = {}
+    for field in ("navi_pearson_r", "blup_pearson_r"):
+        defined = [row[field] for row in rows if row[field] is not None]
+        correlations[field] = float(np.mean(defined)) if defined else None
+        correlations[f"{field}_count"] = len(defined)
     return dict(
-        test_episodes=len(rows), **means, mse_gap_ci95=interval, heritability_bins=bins
+        test_episodes=len(rows),
+        **means,
+        **correlations,
+        mse_gap_ci95=interval,
+        heritability_bins=bins,
     )

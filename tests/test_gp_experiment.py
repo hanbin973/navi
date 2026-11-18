@@ -62,6 +62,8 @@ def test_paired_summary():
             "heritability": h,
             "navi_mse": 2 + gap,
             "blup_mse": 2,
+            "navi_pearson_r": 0.5 if h == 1 else None,
+            "blup_pearson_r": h,
             "mse_gap": gap,
             "prediction_disagreement": 1,
         }
@@ -71,6 +73,10 @@ def test_paired_summary():
     summary = summarize(rows, key)
     assert summary == summarize(rows, key)
     assert summary["mse_gap"] == 1
+    assert summary["navi_pearson_r"] == 0.5
+    assert summary["navi_pearson_r_count"] == 1
+    assert summary["blup_pearson_r"] == 0.625
+    assert summary["blup_pearson_r_count"] == 2
     assert summary["mse_gap_ci95"] == [-1, 3]
     assert [item["count"] for item in summary["heritability_bins"]] == [0, 1, 0, 1]
     assert summary["heritability_bins"][0]["mean_mse_gap"] is None
@@ -93,12 +99,15 @@ def test_compiled_update_changes_parameters():
     params = eqx.filter(model, eqx.is_inexact_array)
     context = jax.random.normal(jax.random.key(1), (3, 4))
     ids = jnp.arange(3)
-    updated, _, finite = make_train_step(optimizer, 2)(
+    updated, _, training_mse, finite = make_train_step(optimizer, 2)(
         model, optimizer.init(params), jax.random.key(2), context, ids
     )
     assert bool(finite)
     episode = draw_episode(jax.random.key(2), context, 2)
     old_prediction = predict(model, context, ids, episode)
+    assert float(training_mse) == pytest.approx(
+        float(jnp.mean((old_prediction - episode.targets) ** 2)), rel=1e-5
+    )
     new_prediction = predict(updated, context, ids, episode)
     assert new_prediction.shape == episode.targets.shape
     assert not np.array_equal(old_prediction, new_prediction)
@@ -128,12 +137,16 @@ def test_runner_smoke(tmp_path):
     )
     run(args)
     metadata = json.loads((output / "run.json").read_text())
+    assert [row["step"] for row in metadata["training_history"]] == [1, 2]
+    assert all(np.isfinite(row["mse"]) for row in metadata["training_history"])
     summary = json.loads((output / "summary.json").read_text())
     with (output / "episodes.csv").open() as file:
         rows = list(csv.DictReader(file))
+    baseline, *trained_history = metadata["validation_history"]
+    assert [baseline["step"], *(row["step"] for row in trained_history)] == [0, 1, 2]
     assert (
         metadata["selected_step"]
-        == min(metadata["validation_history"], key=lambda row: row["mse"])["step"]
+        == min(trained_history, key=lambda row: row["mse"])["step"]
     )
     assert len(rows) == summary["test_episodes"] == 3
     assert (output / "best.eqx").stat().st_size > 0
@@ -146,6 +159,14 @@ def test_runner_smoke(tmp_path):
     context = jax.random.normal(design, (args.n_context, args.p), dtype=jnp.float32)
     ids = jnp.arange(args.n_context, dtype=jnp.int32)
     model = Navi(**metadata["model"], key=init)
+    initial_errors = []
+    for index in range(args.validation_episodes):
+        episode = draw_episode(
+            jax.random.fold_in(validation, index), context, args.n - args.n_context
+        )
+        error = predict(model, context, ids, episode) - episode.targets
+        initial_errors.append(float(jnp.mean(error**2)))
+    assert baseline["mse"] == pytest.approx(np.mean(initial_errors), rel=1e-5)
     with (output / "best.eqx").open("rb") as file:
         model = eqx.tree_deserialise_leaves(file, model)
 
@@ -159,13 +180,20 @@ def test_runner_smoke(tmp_path):
         for index in range(args.validation_episodes)
     ]
     assert np.mean(validation_mses) == pytest.approx(
-        min(item["mse"] for item in metadata["validation_history"]), rel=1e-5
+        min(item["mse"] for item in trained_history), rel=1e-5
     )
     host_context = np.asarray(context, dtype=np.float64)
     gram = host_context @ host_context.T / args.p
     for index, row in enumerate(rows):
         episode, mse = check_episode(jax.random.fold_in(test, index))
         oracle = oracle_predict(host_context, gram, episode, index)
+        predictions = predict(model, context, ids, episode)
+        for field, estimates in (
+            ("navi_pearson_r", predictions),
+            ("blup_pearson_r", oracle),
+        ):
+            expected = np.corrcoef(episode.targets, estimates)[0, 1]
+            assert float(row[field]) == pytest.approx(expected, abs=1e-5)
         assert float(row["navi_mse"]) == pytest.approx(mse, rel=1e-5)
         assert float(row["blup_mse"]) == pytest.approx(
             np.mean((oracle - np.asarray(episode.targets)) ** 2), rel=1e-5

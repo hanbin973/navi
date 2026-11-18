@@ -60,6 +60,9 @@ contract in task 1 and can proceed alongside task 3 once that contract is set.
 - Store one result row per episode with the episode index, sampled variances,
   true heritability, each predictor's latent MSE, their paired MSE difference
   (Navi minus BLUP), and their mean squared prediction disagreement.
+  Record each predictor's Pearson correlation with the latent query
+  targets within each episode. In the summary, report the mean over
+  defined correlations and the number of episodes contributing to it.
 - Aggregate 100 test episodes by default. Resample the episode-level
   differences 2,000 times using the bootstrap stream and report the 2.5th
   and 97.5th percentiles of the bootstrap means. Report the mean paired
@@ -94,13 +97,16 @@ repository root. This depends on task 1. Wire in task 2 for the final test pass.
   `--validate-every`, `--validation-episodes`, `--test-episodes`, and
   `--output-dir`. Require the step count, validation cadence, and output
   directory. Default the master seed to 0 and validation to 32 episodes.
-  Validate at the requested cadence and after the final update. Serialize
+  Record validation MSE at step 0 using the same validation episodes as
+  later checks. Validate at the requested cadence and after the final update.
+  Select the checkpoint from the post-update validations. Serialize
   the checkpoint with the lowest mean validation latent MSE using Equinox
   leaf serialization, keeping the earlier checkpoint on ties. Reload it
   into the same model structure for the final test pass.
 - Write `best.eqx`, `run.json`, `episodes.csv`, and `summary.json`.
   Record the resolved settings, seed, device, wall-clock time, validation
-  history, and selected step in `run.json`. Require a fresh run directory
+  history, pre-update training MSE for each update, and selected step in
+  `run.json`. Require a fresh run directory
   to prevent artifacts from different runs being mixed.
 
 Verify on CPU that small compiled updates have finite gradients and change
@@ -167,4 +173,10 @@ and the reported uncertainty interval. There is no required MSE gap size.
   updates, validation every 500 updates on 32 episodes, and final
   evaluation on 100 held-out episodes. The log is `slurm-66355668.out`
   and the run directory is `main-66355668/` under the scratch output path.
-  Completion and results are pending.
+  Slurm reported `COMPLETED` with exit code `0:0`, elapsed time 2 minutes
+  46 seconds, and peak host RSS about 2.5 GiB. The run recorded all 20
+  validation points and selected update 9,000 with validation MSE 1.41089.
+  All four artifacts are present, including 100 paired test rows. Test
+  latent MSE was 1.29400 for Navi and 0.78497 for oracle BLUP. The mean
+  paired difference was 0.50904, with a 95% episode-bootstrap interval of
+  [0.40080, 0.62580]. Mean squared prediction disagreement was 0.50425.

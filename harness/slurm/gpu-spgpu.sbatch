@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=navi-gpu-attention
-#SBATCH --partition=spgpu
+#SBATCH --partition=spgpu,gpu_mig40
 #SBATCH --account=jonth0
 #SBATCH --mail-user=hblee@umich.edu
 #SBATCH --mail-type=BEGIN,END
