@@ -7,12 +7,13 @@ The intended fast checks are:
 ```sh
 uv run --locked ruff check .
 uv run --locked ruff format --check .
-uv run --locked pytest
+JAX_PLATFORMS=cpu uv run --locked pytest -q
+git diff --check
 ```
 
-There is no test suite yet; pytest will report that no tests were collected.
-Keep checks proportional to the change. Add
-meaningful tests for observable behavior and numerical contracts as code grows.
+Ruff and pytest cover the Navi project. The pinned PFNs submodule has its own
+tooling. CPU parity tests read a checked-in fixture and require only the
+project uv environment.
 
 For CPU and GPU execution checks, use `harness/slurm/cpu-debug.sbatch` and
 `harness/slurm/gpu-spgpu.sbatch` after resolving the prerequisites in

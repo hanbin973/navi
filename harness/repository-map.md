@@ -1,7 +1,7 @@
 # Repository map
 
-Use this map to locate responsibilities; inspect the relevant files before
-changing them. The application architecture has not yet been established.
+Use this map to locate responsibilities and inspect relevant files before
+changing them.
 
 ## Project configuration
 
@@ -23,7 +23,12 @@ changing them. The application architecture has not yet been established.
 
 ## Application code and tests
 
-Locations and responsibilities remain to be defined as the project develops.
+- `navi/model.py` — Equinox episode model and dense PFNs block primitives.
+- `navi/__init__.py` — public model import.
+- `tests/test_pfn_port.py` — primitive initialization and pinned PFNs parity.
+- `tests/test_navi_model.py` — episode validation, context reuse, query
+  semantics, batching, and gradients.
+- `tests/fixtures/` — Torch-free parity data and its CPU PyTorch generator.
 
 ## Design notes
 
@@ -34,3 +39,4 @@ Locations and responsibilities remain to be defined as the project develops.
 - `impl/pfn_pytorch/PFNs/` — pinned upstream PFNs PyTorch reference submodule.
 - `impl/pfn_pytorch/README.md` — module map and reuse guide for the pinned checkout.
 - `impl/navi/model_draft.md` — generic Navi architecture and PFNs reuse boundaries.
+- `impl/navi/impl_navi_jax_equinox.md` — implementation plan and verification record.

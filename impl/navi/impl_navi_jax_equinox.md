@@ -22,7 +22,8 @@ document authorizes no code changes or scheduler jobs by itself.
 
 ## 1. Port and verify the PFNs block primitives
 
-**State:** Pending. This is the foundation for context and query blocks.
+**State:** Complete. The CPU parity tests cover separate projections, rectangular
+attention, and both post-norm block paths.
 
 - Inspect upstream [attention](../pfn_pytorch/PFNs/pfns/model/multi_head_attention.py),
   [MLP](../pfn_pytorch/PFNs/pfns/model/mlp.py),
@@ -62,8 +63,8 @@ pending even if independent JAX checks pass.
 
 ## 2. Assemble the model and verify query semantics
 
-**State:** Pending. Depends on task 1. Interface tests can be prepared
-alongside the primitive parity tests.
+**State:** Complete. The model exposes reusable context and query operations
+and supports differentiating the combined call across episodes.
 
 - Implement a concrete Equinox model in `navi/model.py` and export it from
   `navi/__init__.py`. Use `encode_context(x, ids)` and
@@ -109,7 +110,7 @@ alignment, layer schedule, and gradient behavior.
 
 ## 3. Finish the CPU milestone and gate GPU acceleration separately
 
-**State:** Pending. Depends on tasks 1 and 2.
+**State:** CPU implementation complete. GPU verification awaits a request.
 
 - Update `harness/repository-map.md` for the new package and tests.
   Run all CPU tests and repository checks from the repository root.
@@ -137,7 +138,39 @@ git diff --check
 
 ## Execution record
 
-Implementation and runtime checks are pending. During execution record
-each task's status, commands and outcomes, fixture provenance, and any
-deviation from the supported PFNs subset. Before handing off, identify
-pending reference or GPU checks separately from passing CPU checks.
+The pinned fixture in `tests/fixtures/pfn_port.npz` uses PFNs commit
+`f04d3cad1d4d464f1039ec04d55b8f004b60494a`, PyTorch 2.15.0+cpu, NumPy
+2.5.4, and seed 42. It uses FP32, two heads at width four, FFN hidden
+width seven, three context rows, and one cross-attention query. The
+upstream layer uses a singleton feature slot, ReLU, non-affine LayerNorm,
+and explicit nonzero weights. Tests compare outputs and input and
+parameter gradients at the planned tolerances.
+
+The fixture was generated from the repository root with the following
+command in an isolated uv environment.
+
+```sh
+UV_CACHE_DIR=/tmp/hblee-navi-reference uv run --no-project --python 3.12 \
+  --with 'torch==2.15.0+cpu' --with numpy --with typing-extensions \
+  --index https://download.pytorch.org/whl/cpu \
+  python tests/fixtures/generate_pfn_port.py
+```
+
+Concrete IDs are checked before compiled dispatch. When callers apply
+JIT or vmap directly, an Equinox runtime check guards the gather.
+Floating-point features are converted to FP32, and the outputs are
+FP32. The pair MLP uses biases and nonzero initialization. The PFNs
+block FFN is bias-free and follows the configured output initialization.
+
+- `JAX_PLATFORMS=cpu uv run --locked pytest -q tests/test_pfn_port.py`
+  passed all four primitive tests.
+- `JAX_PLATFORMS=cpu uv run --locked pytest -q` passed all 21 tests,
+  including the query semantics, training gradients, and traced ID checks.
+- `uv run --locked ruff check .` and `git diff --check` passed.
+
+The root Ruff and pytest settings keep the pinned submodule out of
+Navi's check suite. Root lint and focused source formatting pass. Root
+formatting reports one pre-existing Markdown code block in
+`impl/transformer/dense-attention.md`.
+
+GPU acceleration and Slurm execution remain unverified.
