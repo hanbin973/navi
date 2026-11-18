@@ -105,7 +105,7 @@ def test_compiled_update_changes_parameters():
     params = eqx.filter(model, eqx.is_inexact_array)
     context = jax.random.normal(jax.random.key(1), (3, 4))
     ids = jnp.arange(3)
-    updated, _, training_nll, finite = make_train_step(optimizer, 2)(
+    updated, _, training_nll, finite = eqx.filter_jit(make_train_step(optimizer, 2))(
         model, optimizer.init(params), jax.random.key(2), context, ids
     )
     assert bool(finite)
@@ -132,9 +132,9 @@ def test_runner_smoke(tmp_path):
             "--query-depth",
             "3",
             "--steps",
-            "2",
+            "3",
             "--validate-every",
-            "1",
+            "2",
             "--validation-episodes",
             "2",
             "--test-episodes",
@@ -147,13 +147,13 @@ def test_runner_smoke(tmp_path):
     metadata = json.loads((output / "run.json").read_text())
     assert metadata["model"]["query_depth"] == 3
     assert np.all(np.diff(metadata["model"]["bin_edges"]) > 0)
-    assert [row["step"] for row in metadata["training_history"]] == [1, 2]
+    assert [row["step"] for row in metadata["training_history"]] == [1, 2, 3]
     assert all(np.isfinite(row["nll"]) for row in metadata["training_history"])
     summary = json.loads((output / "summary.json").read_text())
     with (output / "episodes.csv").open() as file:
         rows = list(csv.DictReader(file))
     baseline, *trained_history = metadata["validation_history"]
-    assert [baseline["step"], *(row["step"] for row in trained_history)] == [0, 1, 2]
+    assert [baseline["step"], *(row["step"] for row in trained_history)] == [0, 2, 3]
     assert (
         metadata["selected_step"]
         == min(trained_history, key=lambda row: row["nll"])["step"]
@@ -163,7 +163,7 @@ def test_runner_smoke(tmp_path):
     assert summary["mse_gap"] == pytest.approx(
         np.mean([float(r["mse_gap"]) for r in rows])
     )
-    design, init, _, validation, test, _ = jax.random.split(
+    design, init, train, validation, test, _ = jax.random.split(
         jax.random.key(args.seed), 6
     )
     context = jax.random.normal(design, (args.n_context, args.p), dtype=jnp.float32)
@@ -178,6 +178,16 @@ def test_runner_smoke(tmp_path):
         )
         initial_losses.append(float(loss(model, context, ids, episode)))
     assert baseline["nll"] == pytest.approx(np.mean(initial_losses), rel=1e-5)
+    optimizer = optax.adam(metadata["learning_rate"])
+    state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
+    step_once = eqx.filter_jit(make_train_step(optimizer, args.n - args.n_context))
+    sequential = model
+    for row in metadata["training_history"]:
+        sequential, state, nll, finite = step_once(
+            sequential, state, jax.random.fold_in(train, row["step"]), context, ids
+        )
+        assert bool(finite)
+        assert row["nll"] == pytest.approx(float(nll), rel=1e-5)
     with (output / "best.eqx").open("rb") as file:
         model = eqx.tree_deserialise_leaves(file, model)
 

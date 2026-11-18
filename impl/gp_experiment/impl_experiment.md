@@ -89,11 +89,13 @@ repository root. This depends on task 1. Wire in task 2 for the final test pass.
   head on query negative log-density and use its predictive mean for test
   point metrics. Model inputs are context phenotypes, IDs, and unscaled
   Gram features.
-- Build one `eqx.filter_jit` training step using
-  `eqx.filter_value_and_grad` and Optax Adam at `1e-3`. Update trainable
-  arrays with `eqx.apply_updates`. Use one fresh episode per update,
-  validate dimensions and counts at startup, and fail with the update
-  index if loss or gradients are nonfinite.
+- Compile each interval between validations with `eqx.filter_jit` and
+  scan the optimizer updates on device. Each update uses one fresh episode,
+  `eqx.filter_value_and_grad`, and Optax Adam at `1e-3`. In the same call,
+  evaluate the fixed validation episodes sequentially on device. Fetch the
+  interval's losses, finiteness flags, and mean validation loss together.
+  Validate dimensions and counts at startup and report the first nonfinite
+  loss or gradient by update index.
 - Expose `--seed`, `--n`, `--p`, `--n-context`, `--steps`,
   `--validate-every`, `--validation-episodes`, `--test-episodes`, and
   `--output-dir`. Require the step count, validation cadence, and output

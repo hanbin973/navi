@@ -43,7 +43,6 @@ def prior_bin_edges(key, context_rows):
 
 
 def make_train_step(optimizer, query_count):
-    @eqx.filter_jit
     def train_step(model, state, key, context_rows, ids):
         episode = draw_episode(key, context_rows, query_count)
         value, gradients = eqx.filter_value_and_grad(loss)(
@@ -122,50 +121,96 @@ def run(args):
     state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
     train_step = make_train_step(optimizer, query_count)
 
-    @eqx.filter_jit
+    validation_indices = jnp.arange(args.validation_episodes, dtype=jnp.uint32)
+
     def validation_loss(model, key, context_rows, ids):
-        return loss(
-            model, context_rows, ids, draw_episode(key, context_rows, query_count)
-        )
-
-    validation_keys = [
-        jax.random.fold_in(validation, index)
-        for index in range(args.validation_episodes)
-    ]
-
-    def evaluate_validation(model, step):
-        nll = float(
-            np.mean(
-                [
-                    float(validation_loss(model, key, context_rows, ids))
-                    for key in validation_keys
-                ]
+        def evaluate(index):
+            episode = draw_episode(
+                jax.random.fold_in(key, index), context_rows, query_count
             )
+            return loss(model, context_rows, ids, episode)
+
+        return jnp.mean(jax.lax.map(evaluate, validation_indices))
+
+    @eqx.filter_jit
+    def train_chunk(
+        model, state, train_key, validation_key, context_rows, ids, first_step, length
+    ):
+        params, static = eqx.partition(model, eqx.is_inexact_array)
+
+        def update(carry, step):
+            params, state, healthy = carry
+
+            def apply_update():
+                updated, new_state, nll, finite = train_step(
+                    eqx.combine(params, static),
+                    state,
+                    jax.random.fold_in(train_key, step),
+                    context_rows,
+                    ids,
+                )
+                return (eqx.filter(updated, eqx.is_inexact_array), new_state, finite), (
+                    nll,
+                    finite,
+                )
+
+            def skip_update():
+                return carry, (jnp.float32(jnp.nan), healthy)
+
+            return jax.lax.cond(healthy, apply_update, skip_update)
+
+        steps = first_step + jnp.arange(length, dtype=jnp.uint32)
+        (params, state, healthy), (nlls, finite) = jax.lax.scan(
+            update, (params, state, jnp.bool_(True)), steps
         )
+        model = eqx.combine(params, static)
+        validation_nll = jax.lax.cond(
+            healthy,
+            lambda: validation_loss(model, validation_key, context_rows, ids),
+            lambda: jnp.float32(jnp.nan),
+        )
+        return model, state, (nlls, finite, validation_nll)
+
+    def check_validation(nll, step):
         if not np.isfinite(nll):
             raise ValueError(f"Nonfinite validation NLL at step {step}")
-        return nll
+        return float(nll)
 
     checkpoint = args.output_dir / "best.eqx"
     best_loss = np.inf
     best_step = None
-    history = [{"step": 0, "nll": evaluate_validation(model, 0)}]
+    baseline = eqx.filter_jit(validation_loss)(model, validation, context_rows, ids)
+    history = [{"step": 0, "nll": check_validation(jax.device_get(baseline), 0)}]
     training_history = []
-    for step in range(1, args.steps + 1):
-        model, state, training_nll, finite = train_step(
-            model, state, jax.random.fold_in(train, step), context_rows, ids
+    for start_step in range(1, args.steps + 1, args.validate_every):
+        length = min(args.validate_every, args.steps - start_step + 1)
+        model, state, metrics = train_chunk(
+            model,
+            state,
+            train,
+            validation,
+            context_rows,
+            ids,
+            jnp.asarray(start_step, dtype=jnp.uint32),
+            length,
         )
-        training_nll, finite = jax.device_get((training_nll, finite))
-        if not finite:
-            raise ValueError(f"Nonfinite training loss or gradient at update {step}")
-        training_history.append({"step": step, "nll": float(training_nll)})
-        if step % args.validate_every == 0 or step == args.steps:
-            validation_nll = evaluate_validation(model, step)
-            history.append({"step": step, "nll": validation_nll})
-            if validation_nll < best_loss:
-                best_loss, best_step = validation_nll, step
-                with checkpoint.open("wb") as file:
-                    eqx.tree_serialise_leaves(file, model)
+        nlls, finite, validation_nll = jax.device_get(metrics)
+        if not finite.all():
+            failed_step = start_step + int(np.argmin(finite))
+            raise ValueError(
+                f"Nonfinite training loss or gradient at update {failed_step}"
+            )
+        training_history.extend(
+            {"step": step, "nll": float(nll)}
+            for step, nll in enumerate(nlls, start=start_step)
+        )
+        step = start_step + length - 1
+        validation_nll = check_validation(validation_nll, step)
+        history.append({"step": step, "nll": validation_nll})
+        if validation_nll < best_loss:
+            best_loss, best_step = validation_nll, step
+            with checkpoint.open("wb") as file:
+                eqx.tree_serialise_leaves(file, model)
 
     with checkpoint.open("rb") as file:
         model = eqx.tree_deserialise_leaves(file, model)
