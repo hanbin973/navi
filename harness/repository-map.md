@@ -28,6 +28,9 @@ changing them.
 - `navi/helper.py` — abstract query kernel and dataset simulator interfaces,
   Gaussian reference helpers, and training episode assembly.
 - `navi/__init__.py` — public model import.
+- `experiments/gp_experiment/` — fixed-context Gaussian episode simulation,
+  Navi training runner, and paired evaluation with oracle BLUP.
+- `tests/test_gp_experiment.py` — episode, oracle, and runner checks.
 - `tests/test_pfn_port.py` — primitive initialization and pinned PFNs parity.
 - `tests/test_navi_helper.py` — kernel alignment, joint simulation, BLUP
   reference, and training episode checks.
@@ -37,6 +40,8 @@ changing them.
 
 ## Design notes
 
+- `impl/gp_experiment/` — Gaussian feature-effect experiment design,
+  implementation plan, and verification record.
 - `impl/pfn/` — PFN and TabPFN design notes covering theory, task priors,
   loss, Transformer architecture, and inference.
 - `impl/transformer/` — efficient Transformer variants and upstream JAX
