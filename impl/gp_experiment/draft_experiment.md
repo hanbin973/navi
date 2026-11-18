@@ -44,10 +44,10 @@ jointly and retain its sampled variances and query rows for evaluation.
 Use `Navi` configured for a single
 context value, one query feature, one pair feature, 32 bar logits, and
 1,600 IDs. The model receives `y_C[:, None]`, the context IDs, the query diagonal
-of `K` with shape `(400, 1)`, and `K[Q, C]` (the query-by-context block)
-with shape `(400, 1600, 1)`. Keep the Gram features unscaled by the sampled
-variances so Navi learns to predict with the variances latent. Recompute
-the query diagonal and `kappa = K_QC[..., None]` for each episode.
+of `K` with shape `(400, 1)`, and the query-by-context kernel features
+$\sqrt p\,K_{QC}$ with shape `(400, 1600, 1)`. Recompute both
+features for each episode. They depend on the feature rows and panel
+width. The sampled variance parameters stay latent.
 Set the bar edges from simulated training-prior target quantiles. Train
 with mean query negative log-density against `g_Q` and use the predictive
 mean for point metrics.

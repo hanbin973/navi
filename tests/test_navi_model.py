@@ -72,26 +72,6 @@ def test_kernel_bias_init_scale():
         make_model(kernel_bias_init_scale=float("nan"))
 
 
-def test_kernel_bias_input_scale_preserves_logits_and_scales_gradients(episode):
-    init_scaled = make_model(kernel_bias_init_scale=4.0)
-    input_scaled = make_model(kernel_bias_input_scale=4.0)
-    targets = jnp.linspace(-1.5, 2.5, 4)
-
-    @eqx.filter_value_and_grad(has_aux=True)
-    def loss(model):
-        logits = model(*episode)
-        return model.distribution.loss(logits, targets), logits
-
-    (_, expected), init_grad = loss(init_scaled)
-    (_, actual), input_grad = loss(input_scaled)
-    close(actual, expected)
-    for base, scaled in zip(
-        init_grad.kernel_biases, input_grad.kernel_biases, strict=True
-    ):
-        assert jnp.linalg.norm(base.weight) > 0
-        close(scaled.weight, 4.0 * base.weight)
-
-
 def test_input_validation(episode):
     model = make_model()
     x, ids, u, pairs = episode
@@ -187,10 +167,7 @@ def manual_read(model, context, query, pairs):
                 for row in range(len(pairs))
             ]
         )
-        bias = (
-            (pairs * model.kernel_bias_input_scale)
-            @ model.kernel_biases[layer].weight.T
-        ).T
+        bias = (pairs @ model.kernel_biases[layer].weight.T).T
         block = model.query_blocks[layer]
         read = block.attention(token[None], memory[None], bias=bias[None, :, None, :])
         updated = block.attention_norm(token[0] + len(pairs) ** 0.5 * read[0, 0])

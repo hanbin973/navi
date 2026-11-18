@@ -41,7 +41,7 @@ def test_episode_draw_and_gram_features():
     stacked = jnp.concatenate((context, query))
     gram = stacked @ stacked.T / 7
     np.testing.assert_allclose(u[:, 0], gram.diagonal()[5:], rtol=1e-6)
-    np.testing.assert_allclose(kappa[..., 0], gram[5:, :5])
+    np.testing.assert_allclose(kappa[..., 0], 7**0.5 * gram[5:, :5], rtol=1e-6)
     other = draw_episode(jax.random.fold_in(key, 1), context, 3)
     assert not np.array_equal(other.query_rows, query)
     assert not np.array_equal(query_features(context, other.query_rows)[1], kappa)
@@ -147,7 +147,7 @@ def test_runner_smoke(tmp_path):
     metadata = json.loads((output / "run.json").read_text())
     assert metadata["model"]["query_depth"] == 3
     assert metadata["query_read_scale"] == pytest.approx(args.n_context**0.5)
-    assert metadata["model"]["kernel_bias_input_scale"] == pytest.approx(args.p**0.5)
+    assert metadata["pair_kernel_scale"] == pytest.approx(args.p**0.5)
     assert np.all(np.diff(metadata["model"]["bin_edges"]) > 0)
     assert [row["step"] for row in metadata["training_history"]] == [1, 2, 3]
     assert all(np.isfinite(row["nll"]) for row in metadata["training_history"])

@@ -110,7 +110,6 @@ def run(args):
         "context_size": 1,
         "query_size": 1,
         "pair_size": 1,
-        "kernel_bias_input_scale": math.sqrt(args.p),
         "bin_edges": prior_bin_edges(jax.random.fold_in(train, 0), context_rows),
         "num_ids": args.n_context,
         "width": 32,
@@ -249,6 +248,7 @@ def run(args):
     metadata = vars(args) | {
         "output_dir": str(args.output_dir),
         "model": model_settings,
+        "pair_kernel_scale": math.sqrt(args.p),
         "query_read_scale": math.sqrt(args.n_context),
         "optimizer": "adam",
         "learning_rate": learning_rate,

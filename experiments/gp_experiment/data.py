@@ -37,5 +37,5 @@ def draw_episode(key, context_rows, query_count):
 def query_features(context_rows, query_rows):
     p = context_rows.shape[1]
     diagonal = jnp.sum(query_rows**2, axis=1) / p
-    cross = query_rows @ context_rows.T / p
+    cross = query_rows @ context_rows.T / p**0.5
     return diagonal[:, None], cross[..., None]

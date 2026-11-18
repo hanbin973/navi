@@ -87,8 +87,8 @@ repository root. This depends on task 1. Wire in task 2 for the final test pass.
   Fit 32 bars from 8,192 simulated training-prior targets using the training
   key at index 0. Save the edges with the model settings. Train the default
   head on query negative log-density and use its predictive mean for test
-  point metrics. Model inputs are context phenotypes, IDs, and unscaled
-  Gram features.
+  point metrics. Model inputs are context phenotypes, IDs, the Gram
+  diagonal, and cross-Gram features multiplied by $\sqrt p$.
 - Compile each interval between validations with `eqx.filter_jit` and
   scan the optimizer updates on device. Each update uses one fresh episode,
   `eqx.filter_value_and_grad`, and Optax Adam at `1e-3`. In the same call,
@@ -176,12 +176,10 @@ the kernel-conditioned bias. Record the revision, command, seed, resolved
 settings, backend, and completed job status with the metrics. Completion
 requires finite metrics and the paired evaluation artifacts.
 
-Set `kernel_bias_input_scale` to $\sqrt p$ and use the default
-$U[-1,1]$ initialization for each trainable head coefficient. The
-scalar Gram kernel has standard deviation approximately $1/\sqrt p$.
-Scaling the kernel in the logit path preserves the initial logit
-distribution of the larger initializer and increases the change in logits
-for a given parameter update. Record the input scale in `run.json`.
+Generate the cross-kernel feature as $x_*^\top x_i/\sqrt p$ and
+pass it to Navi for both the pair MLP and the logit bias. Record
+$\sqrt p$ as `pair_kernel_scale` in `run.json`. The self-kernel
+feature and oracle covariance use the original $1/p$ normalization.
 
 ### Full-panel GPU result before the initialization change
 
@@ -211,6 +209,20 @@ Across 100 held-out episodes, Navi achieved negative log-density
 0.4988. Oracle BLUP achieved latent MSE 0.7850 and correlation 0.5527.
 The paired MSE gap was 0.2377 with a 95% bootstrap interval of
 [0.1994, 0.2771].
+
+### GPU result with both kernel paths scaled
+
+Slurm job `66391566` completed 5,000 steps in 3 minutes 50 seconds with
+seed 1 and depth three. The runner supplied cross-kernel features
+scaled by $\sqrt{2000}$ to both the pair MLP and the logit projection.
+The query read gain was $\sqrt{1600}=40$. Validation selected step
+5,000 at negative log-density 1.4226.
+
+Across 100 held-out episodes, Navi achieved negative log-density
+1.3540, latent MSE 0.9609, and mean within-episode Pearson correlation
+0.4982. Oracle BLUP achieved latent MSE 0.7850 and correlation 0.5527.
+The paired MSE gap was 0.1759 with a 95% bootstrap interval of
+[0.1416, 0.2127].
 
 ## Prior results
 

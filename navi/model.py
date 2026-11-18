@@ -137,7 +137,6 @@ class Navi(eqx.Module):
     head: Callable[[Array], Array]
     distribution: FullSupportBarDistribution | None
     pair_size: int = eqx.field(static=True)
-    kernel_bias_input_scale: float = eqx.field(static=True)
     out_size: int = eqx.field(static=True)
 
     def __init__(
@@ -154,7 +153,6 @@ class Navi(eqx.Module):
         hidden_size: int | None = None,
         zero_init: bool = True,
         kernel_bias_init_scale: float = 1.0,
-        kernel_bias_input_scale: float = 1.0,
         bin_edges: Array | tuple[float, ...] | list[float] | None = None,
         head: Callable[[Array], Array] | None = None,
         out_size: int | None = None,
@@ -185,9 +183,6 @@ class Navi(eqx.Module):
                 raise ValueError(f"{name} must be a positive integer")
         if not math.isfinite(kernel_bias_init_scale) or kernel_bias_init_scale <= 0:
             raise ValueError("kernel_bias_init_scale must be finite and positive")
-        if not math.isfinite(kernel_bias_input_scale) or kernel_bias_input_scale <= 0:
-            raise ValueError("kernel_bias_input_scale must be finite and positive")
-        self.kernel_bias_input_scale = float(kernel_bias_input_scale)
         if width % num_heads:
             raise ValueError("width must be divisible by num_heads")
         if hidden_size is None:
@@ -300,7 +295,7 @@ class Navi(eqx.Module):
                 strict=True,
             ):
                 memory = jax.vmap(encoder)(jnp.concatenate((state, pairs), axis=-1))
-                bias = jax.vmap(kernel_bias)(pairs * self.kernel_bias_input_scale)
+                bias = jax.vmap(kernel_bias)(pairs)
                 query = block(
                     query,
                     memory,
