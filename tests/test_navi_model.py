@@ -62,6 +62,36 @@ def test_constructor_validation(override):
         make_model(**override)
 
 
+def test_kernel_bias_init_scale():
+    reference = make_model(pair_size=1)
+    scaled = make_model(pair_size=1, kernel_bias_init_scale=4.0)
+    for base, actual in zip(reference.kernel_biases, scaled.kernel_biases, strict=True):
+        np.testing.assert_array_equal(actual.weight, 4.0 * base.weight)
+        assert actual.bias is None
+    with pytest.raises(ValueError, match="kernel_bias_init_scale"):
+        make_model(kernel_bias_init_scale=float("nan"))
+
+
+def test_kernel_bias_input_scale_preserves_logits_and_scales_gradients(episode):
+    init_scaled = make_model(kernel_bias_init_scale=4.0)
+    input_scaled = make_model(kernel_bias_input_scale=4.0)
+    targets = jnp.linspace(-1.5, 2.5, 4)
+
+    @eqx.filter_value_and_grad(has_aux=True)
+    def loss(model):
+        logits = model(*episode)
+        return model.distribution.loss(logits, targets), logits
+
+    (_, expected), init_grad = loss(init_scaled)
+    (_, actual), input_grad = loss(input_scaled)
+    close(actual, expected)
+    for base, scaled in zip(
+        init_grad.kernel_biases, input_grad.kernel_biases, strict=True
+    ):
+        assert jnp.linalg.norm(base.weight) > 0
+        close(scaled.weight, 4.0 * base.weight)
+
+
 def test_input_validation(episode):
     model = make_model()
     x, ids, u, pairs = episode
@@ -157,7 +187,10 @@ def manual_read(model, context, query, pairs):
                 for row in range(len(pairs))
             ]
         )
-        bias = (pairs @ model.kernel_biases[layer].weight.T).T
+        bias = (
+            (pairs * model.kernel_bias_input_scale)
+            @ model.kernel_biases[layer].weight.T
+        ).T
         token = model.query_blocks[layer](token, memory, bias=bias[None, :, None, :])
     return model.head(token[0])
 

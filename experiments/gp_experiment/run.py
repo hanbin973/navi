@@ -3,6 +3,7 @@
 import argparse
 import csv
 import json
+import math
 import time
 from pathlib import Path
 
@@ -109,6 +110,7 @@ def run(args):
         "context_size": 1,
         "query_size": 1,
         "pair_size": 1,
+        "kernel_bias_input_scale": math.sqrt(args.p),
         "bin_edges": prior_bin_edges(jax.random.fold_in(train, 0), context_rows),
         "num_ids": args.n_context,
         "width": 32,

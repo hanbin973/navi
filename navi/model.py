@@ -136,6 +136,7 @@ class Navi(eqx.Module):
     head: Callable[[Array], Array]
     distribution: FullSupportBarDistribution | None
     pair_size: int = eqx.field(static=True)
+    kernel_bias_input_scale: float = eqx.field(static=True)
     out_size: int = eqx.field(static=True)
 
     def __init__(
@@ -151,6 +152,8 @@ class Navi(eqx.Module):
         key: Array,
         hidden_size: int | None = None,
         zero_init: bool = True,
+        kernel_bias_init_scale: float = 1.0,
+        kernel_bias_input_scale: float = 1.0,
         bin_edges: Array | tuple[float, ...] | list[float] | None = None,
         head: Callable[[Array], Array] | None = None,
         out_size: int | None = None,
@@ -179,6 +182,11 @@ class Navi(eqx.Module):
         for name, value in dimensions.items():
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        if not math.isfinite(kernel_bias_init_scale) or kernel_bias_init_scale <= 0:
+            raise ValueError("kernel_bias_init_scale must be finite and positive")
+        if not math.isfinite(kernel_bias_input_scale) or kernel_bias_input_scale <= 0:
+            raise ValueError("kernel_bias_input_scale must be finite and positive")
+        self.kernel_bias_input_scale = float(kernel_bias_input_scale)
         if width % num_heads:
             raise ValueError("width must be divisible by num_heads")
         if hidden_size is None:
@@ -227,12 +235,19 @@ class Navi(eqx.Module):
             if head is None
             else head
         )
-        self.kernel_biases = tuple(
-            eqx.nn.Linear(
+        kernel_biases = []
+        for _ in range(query_depth):
+            linear = eqx.nn.Linear(
                 pair_size, num_heads, use_bias=False, dtype=jnp.float32, key=next(keys)
             )
-            for _ in range(query_depth)
-        )
+            kernel_biases.append(
+                eqx.tree_at(
+                    lambda layer: layer.weight,
+                    linear,
+                    linear.weight * kernel_bias_init_scale,
+                )
+            )
+        self.kernel_biases = tuple(kernel_biases)
 
     def _context_inputs(self, x, ids):
         if x.ndim != 2 or x.shape[0] == 0:
@@ -284,8 +299,8 @@ class Navi(eqx.Module):
                 strict=True,
             ):
                 memory = jax.vmap(encoder)(jnp.concatenate((state, pairs), axis=-1))
-                bias = jax.vmap(kernel_bias)(pairs).T[None, :, None, :]
-                query = block(query, memory, bias=bias)
+                bias = jax.vmap(kernel_bias)(pairs * self.kernel_bias_input_scale)
+                query = block(query, memory, bias=bias.T[None, :, None, :])
             return _features(self.head(query[0]), (self.out_size,), "head output")
 
         return jax.vmap(read)(u, pair_features)

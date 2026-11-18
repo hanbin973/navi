@@ -176,7 +176,14 @@ the kernel-conditioned bias. Record the revision, command, seed, resolved
 settings, backend, and completed job status with the metrics. Completion
 requires finite metrics and the paired evaluation artifacts.
 
-### Full-panel GPU result
+Set `kernel_bias_input_scale` to $\sqrt p$ and use the default
+$U[-1,1]$ initialization for each trainable head coefficient. The
+scalar Gram kernel has standard deviation approximately $1/\sqrt p$.
+Scaling the kernel in the logit path preserves the initial logit
+distribution of the larger initializer and increases the change in logits
+for a given parameter update. Record the input scale in `run.json`.
+
+### Full-panel GPU result before the initialization change
 
 Slurm job `66364149` completed with exit code `0:0` in 3 minutes
 52 seconds on one NVIDIA A40 with two CPUs, 16 GiB of requested host

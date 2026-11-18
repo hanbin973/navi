@@ -66,8 +66,15 @@ to obtain one logit bias per attention head:
 $$
 p_{*i} = \mathrm{MLP}_\ell\big([h_i^{(\ell-1)};\ \tilde\kappa_{*i}]\big),
 \qquad
-\beta_{*i} = B_\ell\,\tilde\kappa_{*i} \in \mathbb{R}^{H}.
+\beta_{*i} = B_\ell\,(r\,\tilde\kappa_{*i}) \in \mathbb{R}^{H}.
 $$
+
+Initialize each entry of $B_\ell$ uniformly in
+$[-s/\sqrt{d_\kappa},s/\sqrt{d_\kappa}]$, where the caller can set the
+initialization scale $s$ and the library defaults to $s=1$.
+The kernel-to-logit path applies a fixed input scale $r$, which also
+defaults to 1. The Gaussian experiment uses $r=\sqrt p$ and $s=1$ so
+optimizer updates act on normalized kernel inputs.
 
 The brackets denote concatenation. For each of the $H$ heads, project
 the current query state $q=q^{(\ell-1)}$ to a query and the pair

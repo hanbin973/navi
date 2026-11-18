@@ -218,7 +218,13 @@ JAX_PLATFORMS=cpu uv run --locked pytest -q tests/test_pfn_port.py
 
 After 5a, add one bias-free FP32 `pair_size -> num_heads` linear map
 per query layer in `Navi`. Store the maps as trainable Equinox submodules
-and split a separate initialization key for each. Keep the existing
+and split a separate initialization key for each.
+The optional `kernel_bias_init_scale` multiplies only these initial
+weights and defaults to 1. The optional `kernel_bias_input_scale`
+defaults to 1 and multiplies the kernel inputs on the logit path at
+every call. Test that moving the same factor from initialization to
+the input preserves initial outputs and scales the bias-weight gradient.
+Keep the existing
 `zero_init` behavior for the attention and MLP residual branches.
 
 In `_decode`, compute pair memory and the head bias from the same

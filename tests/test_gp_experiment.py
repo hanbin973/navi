@@ -146,6 +146,7 @@ def test_runner_smoke(tmp_path):
     run(args)
     metadata = json.loads((output / "run.json").read_text())
     assert metadata["model"]["query_depth"] == 3
+    assert metadata["model"]["kernel_bias_input_scale"] == pytest.approx(args.p**0.5)
     assert np.all(np.diff(metadata["model"]["bin_edges"]) > 0)
     assert [row["step"] for row in metadata["training_history"]] == [1, 2, 3]
     assert all(np.isfinite(row["nll"]) for row in metadata["training_history"])
