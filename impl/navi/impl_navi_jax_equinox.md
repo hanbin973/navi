@@ -110,7 +110,8 @@ alignment, layer schedule, and gradient behavior.
 
 ## 3. Finish the CPU milestone and gate GPU acceleration separately
 
-**State:** CPU implementation complete. GPU verification awaits a request.
+**State:** CPU milestone complete. GPU verification passed for one square
+layout. The single-query training layout remains on XLA.
 
 - Update `harness/repository-map.md` for the new package and tests.
   Run all CPU tests and repository checks from the repository root.
@@ -169,8 +170,28 @@ block FFN is bias-free and follows the configured output initialization.
 - `uv run --locked ruff check .` and `git diff --check` passed.
 
 The root Ruff and pytest settings keep the pinned submodule out of
-Navi's check suite. Root lint and focused source formatting pass. Root
-formatting reports one pre-existing Markdown code block in
-`impl/transformer/dense-attention.md`.
+Navi's check suite. The Markdown example in
+`impl/transformer/dense-attention.md` was formatted to clear the root gate.
 
-GPU acceleration and Slurm execution remain unverified.
+All 21 CPU tests, root Ruff lint and format checks, and
+`git diff --check` passed.
+
+Slurm jobs `66351267` and `66351352` ran on `spgpu` with one node, one
+GPU, two CPUs, 4 GiB of host memory, and a ten-minute limit. The node
+reported an NVIDIA A40, driver 595.71.05, JAX, jaxlib, and the CUDA 13
+plugin at 0.12.0.1, and cuDNN 9.28.1.4.
+
+- Job `66351267` failed the initial gate. FP16 XLA reported an unsupported
+  dot precision algorithm for the single-query cases. cuDNN rejected
+  head width 2 and sequence lengths 17 in the other cases.
+- Job `66351352` passed the BF16 output and Q/K/V gradient comparisons
+  for square 16-by-16 attention at head width 32, against both BF16
+  XLA and FP32 XLA. cuDNN rejected the 1-by-16 training case and
+  both cases with head width 2. The gate therefore failed and Navi
+  retains XLA for both attention paths.
+- Job `66351514` completed successfully with the same resources.
+  The rerun separated forward execution from training and confirmed
+  that raw single-query cuDNN runs forward at width 32 but rejects
+  training. The duplicated-query probe passed output and gradient
+  comparisons with 16 keys at width 32. The production backend stays
+  on XLA. See the [backend capability table](../transformer/dense-attention.md#navi-cuda-checks).

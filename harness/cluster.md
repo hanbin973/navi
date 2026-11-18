@@ -22,8 +22,9 @@
   values are illustrative and do not establish this project's resource limits
   or output location.
 - CPU: `harness/slurm/cpu-debug.sbatch` runs `harness/smoke.py --device cpu`.
-- GPU: `harness/slurm/gpu-spgpu.sbatch` runs `harness/smoke.py --device gpu`;
-  it fails if a GPU backend is unavailable.
+- GPU: `harness/slurm/gpu-spgpu.sbatch` runs the Navi attention backend
+  checks in `harness/gpu_attention.py` and logs the GPU, driver, and
+  CUDA plugin and cuDNN package versions. It requires the CUDA backend.
 - Submit from the repository root after preparing the uv environment. Output
   defaults to Slurm's `slurm-<jobid>.out` in the submission directory; inspect
   the final job status and output before reporting success.

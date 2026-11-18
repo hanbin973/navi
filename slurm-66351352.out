@@ -1,0 +1,15 @@
+name, driver_version, memory.total [MiB]
+NVIDIA A40, 595.71.05, 46068 MiB
+jax 0.12.0.1
+jaxlib 0.12.0.1
+jax-cuda13-plugin 0.12.0.1
+nvidia-cudnn-cu13 9.28.1.4
+Devices [CudaDevice(id=0)]
+PASS q=16 kv=16 heads=2 depth=32 bfloat16
+UNSUPPORTED q=1 kv=16 heads=2 depth=32 bfloat16
+Unsupported sequence length Q 1, KV 16.
+UNSUPPORTED q=3 kv=3 heads=2 depth=2 bfloat16
+The head dim must be <= 128 and a multiple of 8, but got 2.
+UNSUPPORTED q=1 kv=3 heads=2 depth=2 bfloat16
+The head dim must be <= 128 and a multiple of 8, but got 2.
+cuDNN verification failed for 3 cases

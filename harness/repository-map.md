@@ -18,8 +18,9 @@ changing them.
 - `harness/development.md` — development checks and verification expectations.
 - `harness/cluster.md` — cluster rules, job prerequisites, and template routing.
 - `harness/slurm/` — draft CPU/GPU batch templates and school reference example.
-- `harness/smoke.py` — small JAX/Equinox device execution check used by the
-  Slurm templates.
+- `harness/smoke.py` — small JAX/Equinox device execution check.
+- `harness/gpu_attention.py` — Slurm GPU comparison of Navi attention
+  outputs and gradients on XLA and cuDNN.
 
 ## Application code and tests
 
