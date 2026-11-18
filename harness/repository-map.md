@@ -25,8 +25,12 @@ changing them.
 ## Application code and tests
 
 - `navi/model.py` — Equinox episode model and dense PFNs block primitives.
+- `navi/helper.py` — abstract query kernel and dataset simulator interfaces,
+  Gaussian reference helpers, and training episode assembly.
 - `navi/__init__.py` — public model import.
 - `tests/test_pfn_port.py` — primitive initialization and pinned PFNs parity.
+- `tests/test_navi_helper.py` — kernel alignment, joint simulation, BLUP
+  reference, and training episode checks.
 - `tests/test_navi_model.py` — episode validation, context reuse, query
   semantics, batching, and gradients.
 - `tests/fixtures/` — Torch-free parity data and its CPU PyTorch generator.
@@ -41,3 +45,4 @@ changing them.
 - `impl/pfn_pytorch/README.md` — module map and reuse guide for the pinned checkout.
 - `impl/navi/model_draft.md` — generic Navi architecture and PFNs reuse boundaries.
 - `impl/navi/impl_navi_jax_equinox.md` — implementation plan and verification record.
+- `impl/navi_helper/` — helper design and implementation plan.
