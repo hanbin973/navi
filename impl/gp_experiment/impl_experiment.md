@@ -154,6 +154,17 @@ and the reported uncertainty interval. There is no required MSE gap size.
 - The project uv environment's executables passed all 38 CPU tests,
   including seven focused experiment tests. Ruff lint, format checks,
   and `git diff --check` passed.
-- Task 4 awaits confirmed Slurm time and resource limits, GPU environment,
-  and output location. No GPU job was submitted. The next action is the
-  one-update full-size pilot described above.
+- Task 4 pilot submitted as Slurm job `66355590` on `spgpu` with a
+  15-minute time limit, one GPU, one node, two CPUs, and 16 GB of memory.
+  The requested output directory is `/home/hblee/scratch1/gp_experiment`.
+  The pilot writes `slurm-66355590.out` and `pilot-66355590/` there.
+  Slurm reported `COMPLETED` with exit code `0:0`, elapsed time 51 seconds,
+  and peak host RSS about 2.4 GiB. The runner logged 46.3 seconds on an
+  NVIDIA A40 and produced all four artifacts. The single test episode had
+  latent MSE 3.819 for Navi and 1.443 for BLUP.
+- Main comparison submitted as Slurm job `66355668` on `spgpu` with a
+  12-hour limit and the pilot's resource settings. Uses seed 1, 10,000
+  updates, validation every 500 updates on 32 episodes, and final
+  evaluation on 100 held-out episodes. The log is `slurm-66355668.out`
+  and the run directory is `main-66355668/` under the scratch output path.
+  Completion and results are pending.
