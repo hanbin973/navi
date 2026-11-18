@@ -232,8 +232,10 @@ aligned kernel rows. For layer $\ell$ and one test individual, concatenate
 $h_i^{(\ell-1)}$ with $\tilde\kappa_{*i}$ for the existing two-layer ReLU
 pair MLP. Map $\tilde\kappa_{*i}$ alone to $[n,H]$, transpose it to
 $[H,n]$, and insert the batch and query axes for the attention call.
-Use the pair memory for both keys and values, then apply the existing
-attention and MLP residuals with normalization after each. Retain the
+Use the pair memory for both keys and values. Multiply the query
+attention read by $\sqrt n$ before adding it to the residual, where $n$
+is the number of context tokens. Apply layer normalization after each
+residual. The context attention block uses unit read gain. Retain the
 per-query `vmap` and the bar head and custom-head contracts.
 
 Keep the existing array interface. The draft's scalar phenotype $y_i$
@@ -246,7 +248,8 @@ Keep target phenotypes in the loss path and keep context encoding inside
 the differentiated training call.
 
 In `tests/test_navi_model.py`, extend the manual read to calculate the
-bias from the kernel rows and check the state-to-layer schedule using
+bias from the kernel rows, apply the query gain explicitly before
+normalization, and check the state-to-layer schedule using
 distinct layer parameters. Keep the depth-one, cached, chunked, reordered
 and jointly permuted cases. Compare mapped and independent loop outputs
 and gradients under JIT with the bar loss. Check for a finite, nonzero

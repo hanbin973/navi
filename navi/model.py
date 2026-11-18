@@ -97,9 +97,10 @@ class _Block(eqx.Module):
             width, eps=1e-5, use_weight=False, use_bias=False
         )
 
-    def __call__(self, tokens, source=None, *, bias=None):
+    def __call__(self, tokens, source=None, *, bias=None, read_scale=1.0):
         source = tokens if source is None else source
-        tokens = tokens + self.attention(tokens[None], source[None], bias=bias)[0]
+        read = self.attention(tokens[None], source[None], bias=bias)[0]
+        tokens = tokens + read_scale * read
         tokens = jax.vmap(self.attention_norm)(tokens)
         return jax.vmap(self.mlp_norm)(tokens + jax.vmap(self.mlp)(tokens))
 
@@ -300,7 +301,12 @@ class Navi(eqx.Module):
             ):
                 memory = jax.vmap(encoder)(jnp.concatenate((state, pairs), axis=-1))
                 bias = jax.vmap(kernel_bias)(pairs * self.kernel_bias_input_scale)
-                query = block(query, memory, bias=bias.T[None, :, None, :])
+                query = block(
+                    query,
+                    memory,
+                    bias=bias.T[None, :, None, :],
+                    read_scale=math.sqrt(memory.shape[0]),
+                )
             return _features(self.head(query[0]), (self.out_size,), "head output")
 
         return jax.vmap(read)(u, pair_features)

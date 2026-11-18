@@ -92,10 +92,11 @@ a_i^{(h)} = \operatorname{softmax}_i\!\left(
 $$
 
 Apply the same residual and post-normalization order as on the context
-side, using the cross-attention read in the first sublayer:
+side. Multiply the cross-attention read by $\sqrt n$ before adding
+it to the query residual:
 
 $$
-q \leftarrow \mathrm{LN}(q+\mathrm{read}),
+q \leftarrow \mathrm{LN}(q+\sqrt n\,\mathrm{read}),
 \qquad
 q \leftarrow \mathrm{LN}\big(q+\mathrm{MLP}(q)\big).
 $$

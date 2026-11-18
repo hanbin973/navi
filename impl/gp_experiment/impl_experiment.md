@@ -199,6 +199,19 @@ log-density was 1.5060. Held-out latent MSE was 1.2943 for Navi and
 bootstrap interval of [0.4010, 0.6262]. Mean within-episode Pearson
 correlations were 0.0368 for Navi and 0.5527 for BLUP.
 
+### GPU result with the query read gain
+
+The runner records the $\sqrt n$ gain in `run.json` as
+`query_read_scale`. The isolated trial (Slurm job `66365561`) used a
+gain of 40 with 1,600 context individuals and retained the $\sqrt p$
+kernel-input scale. It completed 5,000 steps in 3 minutes 49 seconds
+and selected step 3,500 at validation negative log-density 1.4186.
+Across 100 held-out episodes, Navi achieved negative log-density
+1.3565, latent MSE 1.0226, and mean within-episode Pearson correlation
+0.4988. Oracle BLUP achieved latent MSE 0.7850 and correlation 0.5527.
+The paired MSE gap was 0.2377 with a 95% bootstrap interval of
+[0.1994, 0.2771].
+
 ## Prior results
 
 The previous decoder showed weak learning in the Gaussian experiment.

@@ -249,6 +249,7 @@ def run(args):
     metadata = vars(args) | {
         "output_dir": str(args.output_dir),
         "model": model_settings,
+        "query_read_scale": math.sqrt(args.n_context),
         "optimizer": "adam",
         "learning_rate": learning_rate,
         "log2_variance_bounds": [-2, 2],

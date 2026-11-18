@@ -191,7 +191,10 @@ def manual_read(model, context, query, pairs):
             (pairs * model.kernel_bias_input_scale)
             @ model.kernel_biases[layer].weight.T
         ).T
-        token = model.query_blocks[layer](token, memory, bias=bias[None, :, None, :])
+        block = model.query_blocks[layer]
+        read = block.attention(token[None], memory[None], bias=bias[None, :, None, :])
+        updated = block.attention_norm(token[0] + len(pairs) ** 0.5 * read[0, 0])
+        token = block.mlp_norm(updated + block.mlp(updated))[None]
     return model.head(token[0])
 
 
