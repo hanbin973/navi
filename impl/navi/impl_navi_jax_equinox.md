@@ -2,6 +2,11 @@
 
 ## Scope and starting point
 
+Milestone 5 is the pending decoder overhaul specified by
+[the model draft](model_draft.md). Milestones 1–4 and the prior verification note
+describe the existing library implementation and its verification.
+This update records the implementation plan only.
+
 Implement the model in [model_draft.md](model_draft.md) as native Equinox
 modules. The PFNs submodule at `f04d3cad1d4d464f1039ec04d55b8f004b60494a`
 is the behavioral reference for the supported Transformer operations.
@@ -155,13 +160,7 @@ passed. GPU training was outside this verification run.
 2. Use the PFNs two-layer GELU decoder in `navi/model.py` to emit one logit
    per bar, with output width derived from the edge count.
    Keep the explicit custom-head path and its output-width contract. Keep
-   target values outside context encoding and query decoding. In the Gaussian
-   runner, determine edges from the training prior before optimization and
-   share them between training, validation, and inference. Optimize mean
-   query negative log-density, use validation negative log-density for model
-   selection, and use the predictive mean for existing Navi/BLUP point
-   metrics. Existing scalar decoder checkpoints require retraining for
-   the default bar head.
+   query targets outside context encoding and query decoding.
 3. Keep the existing CPU model test and extend its batched-versus-loop
    training check to use scalar targets and the bar loss under
    `eqx.filter_jit` and `eqx.filter_value_and_grad`. Check FFN/attention
@@ -170,8 +169,7 @@ passed. GPU training was outside this verification run.
    against independent expected values for unequal widths, exact edges and
    both tails, and compare logit gradients with softmax minus the target
    bar indicator. Retain all existing query semantics and primitive
-   parity checks. Update the Gaussian runner CPU smoke check to exercise
-   the distribution loss and verify finite point metrics.
+   parity checks.
 
 Run from the repository root. The focused model command is the same as
 in milestone 2.
@@ -184,61 +182,85 @@ uv run --locked ruff format --check .
 git diff --check
 ```
 
-## Execution record
+## 5. Add kernel-conditioned attention logits
 
-The pinned fixture in `tests/fixtures/pfn_port.npz` uses PFNs commit
-`f04d3cad1d4d464f1039ec04d55b8f004b60494a`, PyTorch 2.15.0+cpu, NumPy
-2.5.4, and seed 42. It uses FP32, two heads at width four, FFN hidden
-width seven, three context rows, and one cross-attention query. The
-upstream layer uses a singleton feature slot, ReLU, non-affine LayerNorm,
-and explicit nonzero weights. Tests compare outputs and input and
-parameter gradients at the planned tolerances.
+**State.** Implemented. Query attention now adds a learned per-head
+kernel projection to the scaled logits in every query layer. The
+existing affine projections, context stack, and pair encoder supply
+the inputs to this path. The full CPU suite passed all 44 tests in the
+prepared project uv environment. Ruff lint, format, and diff checks passed.
 
-The fixture was generated from the repository root with the following
-command in an isolated uv environment.
+Run implementation checks from the repository root
+(`/home/hblee/research/navi`) using the project uv environment.
+
+### 5a. Extend the existing attention primitive
+
+In `navi/model.py`, thread an optional additive logit bias through
+`_Block` to `_Attention`, and forward it as `bias` to the existing
+noncausal XLA `jax.nn.dot_product_attention` call. Keep the existing
+Q/K/V and head-wise output projections. Use `[B,H,1,n]` for the
+single-query bias, broadcastable over the attention logits. The attention
+primitive scales the dot product by $1/\sqrt{d}$ before adding the bias.
+Context self-attention calls the block without a bias.
+
+Extend `tests/test_pfn_port.py` with an independent FP32 reference that
+forms projected logits, scales them, adds distinct nonzero biases per head
+and context position, then applies softmax across context positions.
+Compare the output and gradients through Q/K/V, the projections, and the
+bias for rectangular attention. Retain the pinned bias-free parity checks
+for the shared attention primitive.
 
 ```sh
-UV_CACHE_DIR=/tmp/hblee-navi-reference uv run --no-project --python 3.12 \
-  --with 'torch==2.15.0+cpu' --with numpy --with typing-extensions \
-  --index https://download.pytorch.org/whl/cpu \
-  python tests/fixtures/generate_pfn_port.py
+JAX_PLATFORMS=cpu uv run --locked pytest -q tests/test_pfn_port.py
 ```
 
-Concrete IDs are checked before compiled dispatch. When callers apply
-JIT or vmap directly, an Equinox runtime check guards the gather.
-Floating-point features are converted to FP32, and the outputs are
-FP32. The pair MLP uses biases and nonzero initialization. The PFNs
-block FFN is bias-free and follows the configured output initialization.
+### 5b. Wire the decoder and verify the trait and query contracts
 
-- `JAX_PLATFORMS=cpu uv run --locked pytest -q tests/test_pfn_port.py`
-  passed all four primitive tests.
-- `JAX_PLATFORMS=cpu uv run --locked pytest -q` passed all 21 tests,
-  including the query semantics, training gradients, and traced ID checks.
-- `uv run --locked ruff check .` and `git diff --check` passed.
+After 5a, add one bias-free FP32 `pair_size -> num_heads` linear map
+per query layer in `Navi`. Store the maps as trainable Equinox submodules
+and split a separate initialization key for each. Keep the existing
+`zero_init` behavior for the attention and MLP residual branches.
 
-The root Ruff and pytest settings keep the pinned submodule out of
-Navi's check suite. The Markdown example in
-`impl/transformer/dense-attention.md` was formatted to clear the root gate.
+In `_decode`, compute pair memory and the head bias from the same
+aligned kernel rows. For layer $\ell$ and one test individual, concatenate
+$h_i^{(\ell-1)}$ with $\tilde\kappa_{*i}$ for the existing two-layer ReLU
+pair MLP. Map $\tilde\kappa_{*i}$ alone to $[n,H]$, transpose it to
+$[H,n]$, and insert the batch and query axes for the attention call.
+Use the pair memory for both keys and values, then apply the existing
+attention and MLP residuals with normalization after each. Retain the
+per-query `vmap` and the bar head and custom-head contracts.
 
-All 21 CPU tests, root Ruff lint and format checks, and
-`git diff --check` passed.
+Keep the existing array interface. The draft's scalar phenotype $y_i$
+uses the existing one-column representation `observed[:, None]` with
+`context_size=1`, with one row per context individual. Encode a
+trait once per combined call and reuse the immutable context-state tuple
+across separate query chunks via `encode_context` and `decode_queries`.
+Refresh the tuple after changes to phenotypes, IDs, or model parameters.
+Keep target phenotypes in the loss path and keep context encoding inside
+the differentiated training call.
 
-Slurm jobs `66351267` and `66351352` ran on `spgpu` with one node, one
-GPU, two CPUs, 4 GiB of host memory, and a ten-minute limit. The node
-reported an NVIDIA A40, driver 595.71.05, JAX, jaxlib, and the CUDA 13
-plugin at 0.12.0.1, and cuDNN 9.28.1.4.
+In `tests/test_navi_model.py`, extend the manual read to calculate the
+bias from the kernel rows and check the state-to-layer schedule using
+distinct layer parameters. Keep the depth-one, cached, chunked, reordered
+and jointly permuted cases. Compare mapped and independent loop outputs
+and gradients under JIT with the bar loss. Check for a finite, nonzero
+gradient on the bias weights with distinct kernels, nonzero attention
+output projections, and a nondegenerate loss. Include a single-column phenotype case.
 
-- Job `66351267` failed the initial gate. FP16 XLA reported an unsupported
-  dot precision algorithm for the single-query cases. cuDNN rejected
-  head width 2 and sequence lengths 17 in the other cases.
-- Job `66351352` passed the BF16 output and Q/K/V gradient comparisons
-  for square 16-by-16 attention at head width 32, against both BF16
-  XLA and FP32 XLA. cuDNN rejected the 1-by-16 training case and
-  both cases with head width 2. The gate therefore failed and Navi
-  retains XLA for both attention paths.
-- Job `66351514` completed successfully with the same resources.
-  The rerun separated forward execution from training and confirmed
-  that raw single-query cuDNN runs forward at width 32 but rejects
-  training. The duplicated-query probe passed output and gradient
-  comparisons with 16 keys at width 32. The production backend stays
-  on XLA. See the [backend capability table](../transformer/dense-attention.md#navi-cuda-checks).
+```sh
+JAX_PLATFORMS=cpu uv run --locked pytest -q tests/test_navi_model.py
+JAX_PLATFORMS=cpu uv run --locked pytest -q
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+git diff --check
+```
+
+The new kernel-to-logit maps add parameter leaves. Initialize the new
+model from scratch when using Equinox leaf serialization.
+
+## Prior verification
+
+The existing library passed CPU parity against the pinned PFNs fixture
+and CPU model checks. Earlier GPU probes supported square cuDNN attention
+at the tested layout and left single-query training on XLA. See the
+[backend results](../transformer/dense-attention.md#navi-cuda-checks).

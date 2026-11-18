@@ -1,93 +1,101 @@
 # Navi model draft
 
-Navi encodes a fixed set of identified context items once per episode.
-Each query reads the context through its own attention memory, built by
-combining context states with query–context feature vectors. The network
-takes numeric features and defaults to a PFNs bar-distribution head for
-scalar regression. The caller supplies features, training targets, and
-fixed bin edges on the target scale.
-
-The architecture has two paths. A row-wise Transformer contextualizes
-observations from the fixed set of items. A query stack uses those states
-and pair features to produce an output independently for each query.
+Navi encodes the observed phenotypes of identified context individuals
+once per trait. Each test individual reads those context states through
+cross-attention conditioned on its kernel values with the context
+individuals. The default output head is a PFNs bar distribution for
+scalar regression.
 
 ## Input and output
 
-Shapes below omit a leading batch dimension for independent episodes.
-Let $n$ be the number of context items, $m$ the number of queries, and
-$d$ the model width.
+Shapes below omit a leading batch dimension for independent traits.
+Let $n$ be the number of context individuals, $m$ the number of test
+individuals, and $d_{mathrm{model}}$ the model width.
 
 | Tensor | Shape | Meaning |
 | --- | --- | --- |
-| Context observations $X$ | $n\times d_x$ | One observed feature vector $x_i$ per context item |
-| Context IDs | $n$ | Stable indices into a learned table for the fixed set of context items |
-| Query features $U$ | $m\times d_u$ | One feature vector $u_j$ per query |
-| Pair features $\kappa$ | $m\times n\times d_\kappa$ | One generic feature vector $\kappa_{ji}$ for query $j$ and context item $i$ |
-| Output $Z$ | $m\times K$ | One logit per bar and query for the default head |
+| Context phenotypes $y$ | $n$ | One observed scalar $y_i$ per context individual |
+| Context IDs | $n$ | Stable indices into the learned individual embedding table |
+| Query features $U$ | $m\times d_u$ | One feature vector $u_*$ per test individual |
+| Kernel values $\tilde\kappa$ | $m\times n\times d_\kappa$ | One vector $\tilde\kappa_{*i}$ per test–context pair |
+| Output $Z$ | $m\times K$ | One logit per bar and test individual for the default head |
 
-The context axis of $\kappa$ follows the same order as $X$ and the context
-IDs. Its query axis follows $U$. IDs identify items independently of their
-row positions. Training targets stay outside the forward inputs. Each
-episode requires at least one valid context item.
+The context axis of $\tilde\kappa$ follows the order of $y$ and the
+context IDs. Its query axis follows $U$. IDs identify individuals
+independently of row position. Test phenotypes used for supervision stay
+outside the forward inputs. Each trait requires at least one valid
+context individual.
 
 ## Context encoder
 
-Project each context observation and add the corresponding learned ID
-embedding. Apply $L_c$ row self-attention blocks to the resulting tokens.
+Run the context encoder once per trait. Project each observed phenotype
+and add the learned embedding $e_i$ for individual $i$:
 
 $$
-h_i^{(0)} = E_x(x_i) + e_{\operatorname{id}(i)}, \qquad
-H^{(\ell)} = C_\ell(H^{(\ell-1)}), \quad 1\leq \ell\leq L_c.
+h_i^{(0)} = W_c\,y_i + c + e_i.
 $$
 
-Reuse PFNs `PerFeatureLayer` with feature attention disabled and one slot
-per row. Its input layout is $[B,n,1,d]$. Treat all valid rows as context
-and omit row-position encodings. Each block applies row self-attention,
-adds its residual, and normalizes across the embedding coordinates. It
-then applies a token-wise feed-forward network, adds its residual, and
-applies a second normalization across the embedding coordinates. For the initial implementation, use batches with a common context
-length and run the uncached upstream layer path. Navi retains the resulting
-hidden states itself. See the [pinned PFNs layer](../pfn_pytorch/PFNs/pfns/model/layer.py).
+Starting from these tokens, apply $L-1$ standard Transformer blocks.
+Each block applies self-attention across context tokens and a token-wise
+MLP, with a residual and layer normalization after each sublayer:
+
+$$
+t \leftarrow \mathrm{LN}\big(t + \mathrm{Attn}(t,t)\big),
+\qquad
+t \leftarrow \mathrm{LN}\big(t + \mathrm{MLP}(t)\big).
+$$
+
+Retain the initial states and every block output,
+$h^{(0)},\ldots,h^{(L-1)}$. Context tokens attend exclusively to other
+tokens in the context sequence, including themselves.
 
 ## Query path
 
-Project the query feature vector to initialize its state. At each query
-layer, construct a separate memory for each query. Query layer $\ell$ reads $H^{(\ell-1)}$, so the
-first query layer reads the projected observations and ID embeddings
-before any context self-attention. With $L_q$ query layers, this schedule
-uses $L_c=L_q-1$ context blocks.
+Run the query path independently for each test individual $*$. Initialize
+its state from its query features:
 
 $$
-q_j^{(0)} = E_u(u_j),\qquad
-p_{ji}^{(\ell)} = g_\ell\!\left([h_i^{(\ell-1)};\kappa_{ji}]\right),
-\quad 1\leq \ell\leq L_q.
+q^{(0)} = W_u\,u_* + c_u.
 $$
 
-The bracket denotes concatenation. Start with a learned MLP for
-$g_\ell:\mathbb R^{d+d_\kappa}\to\mathbb R^d$. These pair representations
-supply both keys and values. Apply the existing PFNs attention and
-feed-forward modules with separate post-normalization stages.
+At each layer $\ell=1,\ldots,L$, build a pair representation for every
+context individual using that layer's two-layer ReLU MLP. In parallel,
+apply a learned linear map without intercept to the same kernel vector
+to obtain one logit bias per attention head:
 
 $$
-\begin{aligned}
-a_j^{(\ell)} &=
-  \operatorname{LN}_{\ell,1}\!\left(
-    q_j^{(\ell-1)} +
-    \operatorname{MHA}_{\ell}(q_j^{(\ell-1)},P_j^{(\ell)},P_j^{(\ell)})
-  \right),\\
-q_j^{(\ell)} &=
-  \operatorname{LN}_{\ell,2}\!\left(a_j^{(\ell)} +
-    \operatorname{FFN}_{\ell}(a_j^{(\ell)})\right),\\
-z_j &= D(q_j^{(L_q)}).
-\end{aligned}
+p_{*i} = \mathrm{MLP}_\ell\big([h_i^{(\ell-1)};\ \tilde\kappa_{*i}]\big),
+\qquad
+\beta_{*i} = B_\ell\,\tilde\kappa_{*i} \in \mathbb{R}^{H}.
 $$
 
-$P_j^{(\ell)}$ stacks the $n$ pair vectors for query $j$. In the upstream
-attention API, the query state is the input and the pair tensor is the
-separate source for both K and V. Flatten episode and query axes into a
-batch of independent reads. Each read has one query token and $n$ memory
-tokens. Use upstream residual addition or explicit addition once per
-sublayer.
+The brackets denote concatenation. For each of the $H$ heads, project
+the current query state $q=q^{(\ell-1)}$ to a query and the pair
+representations to keys and values. For head dimension $d$, add the
+bias to the scaled dot-product logit before taking the softmax over
+context individuals. The projections below belong to layer $\ell$:
+
+$$
+a_i^{(h)} = \operatorname{softmax}_i\!\left(
+\frac{1}{\sqrt{d}}\left\langle W_Q^{(h)}q,\ W_K^{(h)}p_{*i}\right\rangle
++ \beta_{*i,h}\right),
+\qquad
+\mathrm{read} = \sum_{h=1}^{H} W_{\mathrm{out}}^{(h)}
+\sum_{i=1}^{n} a_i^{(h)} W_V^{(h)}p_{*i}.
+$$
+
+Apply the same residual and post-normalization order as on the context
+side, using the cross-attention read in the first sublayer:
+
+$$
+q \leftarrow \mathrm{LN}(q+\mathrm{read}),
+\qquad
+q \leftarrow \mathrm{LN}\big(q+\mathrm{MLP}(q)\big).
+$$
+
+The result is $q^{(\ell)}$. The output head reads $q^{(L)}$. Each
+attention read has one query token and $n$ pair tokens. Queries never
+attend to each other.
 
 ## Default output head and training loss
 
@@ -126,18 +134,18 @@ Point-metric comparisons such as BLUP use this distribution mean.
 
 | Component | Implementation boundary |
 | --- | --- |
-| Observation and query projections | Reuse linear or MLP projections where their input layout fits |
+| Phenotype and query projections | Use affine projections and add the learned individual embedding on the context side |
 | Context Transformer | Reuse row-only `PerFeatureLayer` |
-| Query block primitives | Reuse `MultiHeadAttention`, `MLP`, and `LayerNorm` |
-| Query-specific memory | Add the pair encoder and the wrapper that aligns, batches, and reads the pair features |
+| Query block primitives | Reuse the attention, MLP, and normalization primitives where they support the specified equations |
+| Query-specific memory | Build pair vectors and per-head logit biases from the aligned kernel vectors |
 | Decoder and training | Share the fixed PFNs bar distribution between the default loss and inference. Supply task-specific episode sampling and supervision |
 
 The wrapper owns context ID lookup, layerwise state capture, and query
-assembly. Context states depend on the context observations, IDs, and
+assembly. Context states depend on the observed phenotypes, IDs, and
 current model parameters. They can serve many queries during inference.
 Pair representations and projected keys and values depend on the query's
-pair features, so compute them per query. Chunk the query axis if needed
-to bound the temporary $Bmn d$ pair activations per layer. At fixed width,
+kernel values, so compute them per query. Chunk the query axis if needed
+to bound the temporary $Bmn d_{\mathrm{model}}$ pair activations per layer. At fixed width,
 dense context attention uses $O(n^2)$ score work per context block, and
 query attention uses $O(mn)$ score work per query block.
 
@@ -149,7 +157,9 @@ query attention uses $O(mn)$ score work per query block.
   parameters. Check outputs and training gradients.
 - Compare cached and freshly encoded context, and verify that changing
   query inputs leaves the context states unchanged.
-- Jointly permute observations, IDs, and the context axis of $\kappa$.
+- Compare attention with an explicit scaled dot-product reference that
+  adds the kernel-derived bias before softmax.
+- Jointly permute phenotypes, IDs, and the context axis of $\tilde\kappa$.
   Confirm that query outputs are invariant within numerical tolerance.
 - Check that a single query gives the same output alone or in a chunk,
   and that reordering queries reorders outputs correspondingly.
