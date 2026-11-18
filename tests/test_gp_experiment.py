@@ -163,6 +163,9 @@ def test_runner_smoke(tmp_path):
     assert summary["mse_gap"] == pytest.approx(
         np.mean([float(r["mse_gap"]) for r in rows])
     )
+    assert summary["navi_nll"] == pytest.approx(
+        np.mean([float(r["navi_nll"]) for r in rows])
+    )
     design, init, train, validation, test, _ = jax.random.split(
         jax.random.key(args.seed), 6
     )
@@ -218,6 +221,9 @@ def test_runner_smoke(tmp_path):
     gram = host_context @ host_context.T / args.p
     for index, row in enumerate(rows):
         episode, mse = check_episode(jax.random.fold_in(test, index))
+        nll = float(row["navi_nll"])
+        assert np.isfinite(nll)
+        assert nll == pytest.approx(float(loss(model, context, ids, episode)), rel=1e-5)
         oracle = oracle_predict(host_context, gram, episode, index)
         predictions = predict(model, context, ids, episode)
         for field, estimates in (

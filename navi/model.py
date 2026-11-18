@@ -45,10 +45,10 @@ class _Attention(eqx.Module):
             jnp.einsum("bts,hds->bthd", source, self.w_v),
         )
 
-    def __call__(self, query, source):
+    def __call__(self, query, source, *, bias=None):
         q, k, v = self.project(query, source)
         heads = jax.nn.dot_product_attention(
-            q, k, v, is_causal=False, implementation="xla"
+            q, k, v, bias=bias, is_causal=False, implementation="xla"
         )
         return jnp.einsum("bthd,hds->bts", heads, self.w_out)
 
@@ -97,9 +97,9 @@ class _Block(eqx.Module):
             width, eps=1e-5, use_weight=False, use_bias=False
         )
 
-    def __call__(self, tokens, source=None):
+    def __call__(self, tokens, source=None, *, bias=None):
         source = tokens if source is None else source
-        tokens = tokens + self.attention(tokens[None], source[None])[0]
+        tokens = tokens + self.attention(tokens[None], source[None], bias=bias)[0]
         tokens = jax.vmap(self.attention_norm)(tokens)
         return jax.vmap(self.mlp_norm)(tokens + jax.vmap(self.mlp)(tokens))
 
@@ -122,6 +122,8 @@ class Navi(eqx.Module):
     Use one unpadded episode per call. Apply vmap to batch episodes of
     the same shape. For training, differentiate a loss that calls the model
     so gradients reach the context projection, ID embeddings and blocks.
+    Each query layer uses pair features in both its key/value memory and
+    its per-head attention logit bias.
     """
 
     context_projection: eqx.nn.Linear
@@ -130,6 +132,7 @@ class Navi(eqx.Module):
     context_blocks: tuple[_Block, ...]
     query_blocks: tuple[_Block, ...]
     pair_encoders: tuple[_MLP, ...]
+    kernel_biases: tuple[eqx.nn.Linear, ...]
     head: Callable[[Array], Array]
     distribution: FullSupportBarDistribution | None
     pair_size: int = eqx.field(static=True)
@@ -182,7 +185,7 @@ class Navi(eqx.Module):
             hidden_size = 2 * width
         self.pair_size = pair_size
         self.out_size = out_size
-        keys = iter(jax.random.split(key, 3 * query_depth + 3))
+        keys = iter(jax.random.split(key, 4 * query_depth + 3))
         self.context_projection = eqx.nn.Linear(
             context_size, width, dtype=jnp.float32, key=next(keys)
         )
@@ -223,6 +226,12 @@ class Navi(eqx.Module):
             )
             if head is None
             else head
+        )
+        self.kernel_biases = tuple(
+            eqx.nn.Linear(
+                pair_size, num_heads, use_bias=False, dtype=jnp.float32, key=next(keys)
+            )
+            for _ in range(query_depth)
         )
 
     def _context_inputs(self, x, ids):
@@ -267,11 +276,16 @@ class Navi(eqx.Module):
     def _decode(self, context, u, pair_features):
         def read(query_features, pairs):
             query = self.query_projection(query_features)[None]
-            for state, encoder, block in zip(
-                context, self.pair_encoders, self.query_blocks, strict=True
+            for state, encoder, kernel_bias, block in zip(
+                context,
+                self.pair_encoders,
+                self.kernel_biases,
+                self.query_blocks,
+                strict=True,
             ):
                 memory = jax.vmap(encoder)(jnp.concatenate((state, pairs), axis=-1))
-                query = block(query, memory)
+                bias = jax.vmap(kernel_bias)(pairs).T[None, :, None, :]
+                query = block(query, memory, bias=bias)
             return _features(self.head(query[0]), (self.out_size,), "head output")
 
         return jax.vmap(read)(u, pair_features)

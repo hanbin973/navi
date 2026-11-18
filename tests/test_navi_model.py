@@ -95,9 +95,14 @@ def test_input_validation(episode):
 
 def test_one_layer_and_custom_head(episode):
     model = make_model(
-        query_depth=1, bin_edges=None, out_size=2, head=lambda token: token[:2]
+        context_size=1,
+        query_depth=1,
+        bin_edges=None,
+        out_size=2,
+        head=lambda token: token[:2],
     )
     x, ids, u, pairs = episode
+    x = x[:, :1]
     context = model.encode_context(x, ids)
     assert len(context) == 1
     assert not model.context_blocks
@@ -152,7 +157,8 @@ def manual_read(model, context, query, pairs):
                 for row in range(len(pairs))
             ]
         )
-        token = model.query_blocks[layer](token, memory)
+        bias = (pairs @ model.kernel_biases[layer].weight.T).T
+        token = model.query_blocks[layer](token, memory, bias=bias[None, :, None, :])
     return model.head(token[0])
 
 
@@ -216,6 +222,10 @@ def test_batched_training_matches_independent_loop(episode):
         close(actual, reference)
     assert jnp.linalg.norm(gradients.head.layers[-1].weight) > 0
     assert jnp.linalg.norm(gradients.pair_encoders[0].linear1.weight) > 0
+    for layer in gradients.kernel_biases:
+        assert layer.bias is None
+        assert jnp.all(jnp.isfinite(layer.weight))
+        assert jnp.linalg.norm(layer.weight) > 0
     assert jnp.linalg.norm(gradients.context_blocks[0].attention.w_out) > 0
     assert jnp.linalg.norm(gradients.context_projection.weight) > 0
     assert jnp.linalg.norm(gradients.id_embedding.weight[episode[1]]) > 0

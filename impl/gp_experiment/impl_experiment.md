@@ -150,50 +150,51 @@ test episodes and capture its completed job status, run directory, selected
 step, and metrics in this plan. Completion requires valid paired results
 and the reported uncertainty interval. There is no required MSE gap size.
 
-## Execution record
+## 5. Evaluate the kernel-conditioned Navi decoder
 
-- Tasks 1–3 implemented in `experiments/gp_experiment/`. The runner uses
-  the existing project dependencies and Navi public model. The tests cover
-  fresh query features, shared effects, the ridge equivalence, compiled
-  updates, checkpoint selection, and paired evaluation from replayed keys.
-- The reduced CPU CLI run used 16 individuals, 12 features, 12 context rows,
-  two updates, two validation episodes, and three test episodes. It wrote
-  all four artifacts with finite scores. This verifies the execution path
-  at reduced size.
-- The project uv environment's executables passed all 38 CPU tests,
-  including seven focused experiment tests. Ruff lint, format checks,
-  and `git diff --check` passed.
-- Task 4 pilot submitted as Slurm job `66355590` on `spgpu` with a
-  15-minute time limit, one GPU, one node, two CPUs, and 16 GB of memory.
-  The requested output directory is `/home/hblee/scratch1/gp_experiment`.
-  The pilot writes `slurm-66355590.out` and `pilot-66355590/` there.
-  Slurm reported `COMPLETED` with exit code `0:0`, elapsed time 51 seconds,
-  and peak host RSS about 2.4 GiB. The runner logged 46.3 seconds on an
-  NVIDIA A40 and produced all four artifacts. The single test episode had
-  latent MSE 3.819 for Navi and 1.443 for BLUP.
-- Main comparison submitted as Slurm job `66355668` on `spgpu` with a
-  12-hour limit and the pilot's resource settings. Uses seed 1, 10,000
-  updates, validation every 500 updates on 32 episodes, and final
-  evaluation on 100 held-out episodes. The log is `slurm-66355668.out`
-  and the run directory is `main-66355668/` under the scratch output path.
-  Slurm reported `COMPLETED` with exit code `0:0`, elapsed time 2 minutes
-  46 seconds, and peak host RSS about 2.5 GiB. The run recorded all 20
-  validation points and selected update 9,000 with validation MSE 1.41089.
-  All four artifacts are present, including 100 paired test rows. Test
-  latent MSE was 1.29400 for Navi and 0.78497 for oracle BLUP. The mean
-  paired difference was 0.50904, with a 95% episode-bootstrap interval of
-  [0.40080, 0.62580]. Mean squared prediction disagreement was 0.50425.
-- Depth-3 comparison submitted as Slurm job `66356387` on
-  `spgpu,gpu_mig40` with a 15-minute limit. It uses two context layers and
-  three query layers, with the original main run's seed, update count,
-  validation cadence, and test count. The scratch output directory is
-  `main-depth3-66356387/` and the log is `slurm-66356387.out`.
-  The reduced-size CPU runner test passed at depth 3. Slurm reported
-  `COMPLETED` with exit code `0:0` after 6 minutes 29 seconds on `spgpu`.
-  All 10,000 training losses and 100 test rows are present. Validation
-  MSE fell from 2.04820 at step 0 to 1.41141 at step 500 and reached
-  1.41098 at the selected step 9,000. Training MSE averaged 1.37662 over
-  the first 1,000 updates and 1.40457 over the final 1,000. Test latent
-  MSE was 1.29400 for Navi and 0.78497 for BLUP. The paired gap was
-  0.50903 (95% bootstrap interval [0.40077, 0.62581]). Mean within-episode
-  Pearson correlations were 0.00071 for Navi and 0.55266 for BLUP.
+**State.** The runner changes passed the CPU smoke check, and the
+full-panel GPU run completed. The runner uses the
+[Navi library decoder milestone](../navi/impl_navi_jax_equinox.md#5-add-kernel-conditioned-attention-logits).
+The existing runner already passes scalar observed phenotypes and aligned
+Gram features through the public Navi API. Start a fresh model and optimizer
+in a fresh output directory.
+
+In `experiments/gp_experiment/run.py`, evaluate the selected checkpoint's
+held-out negative log-density with the existing bar loss on the same test
+episodes used for paired point scoring. Record the test loss as `navi_nll` in `episodes.csv` and its mean in
+`summary.json`. Keep reporting Navi and
+oracle BLUP MSE and Pearson correlation, the paired MSE gap and its
+bootstrap interval, and the validation negative log-density history from
+step zero. Extend the runner test in `tests/test_gp_experiment.py` to
+check that held-out loss is finite and matches the loss recomputed from
+the selected checkpoint on the replayed test episodes.
+
+Run the focused CPU test and the reduced-size smoke command from task 3.
+Then use the Slurm workflow in task 4 for the new decoder, including a
+full-panel pilot that exercises forward and backward execution with
+the kernel-conditioned bias. Record the revision, command, seed, resolved
+settings, backend, and completed job status with the metrics. Completion
+requires finite metrics and the paired evaluation artifacts.
+
+### Full-panel GPU result
+
+Slurm job `66364149` completed with exit code `0:0` in 3 minutes
+52 seconds on one NVIDIA A40 with two CPUs, 16 GiB of requested host
+memory, and a 15-minute limit. The run used seed 1, depth three, 5,000
+updates, 32 validation episodes every 500 steps, and 100 test episodes.
+All four artifacts were written to
+`/home/hblee/scratch1/gp_experiment/kernel-bias-66364149`.
+
+Validation negative log-density was 1.6452 at initialization, 1.5855 at
+the selected step 3,500, and 1.5961 at step 5,000. Held-out negative
+log-density was 1.5060. Held-out latent MSE was 1.2943 for Navi and
+0.7850 for oracle BLUP. The paired MSE gap was 0.5093 with a 95%
+bootstrap interval of [0.4010, 0.6262]. Mean within-episode Pearson
+correlations were 0.0368 for Navi and 0.5527 for BLUP.
+
+## Prior results
+
+The previous decoder showed weak learning in the Gaussian experiment.
+At depth three, held-out latent MSE was 1.294 for Navi and 0.785 for
+oracle BLUP, with mean within-episode Pearson correlations of 0.001
+and 0.553, respectively.

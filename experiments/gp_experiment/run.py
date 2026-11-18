@@ -216,16 +216,29 @@ def run(args):
         model = eqx.tree_deserialise_leaves(file, model)
     host_context = np.asarray(context_rows, dtype=np.float64)
     gram = host_context @ host_context.T / args.p
-    predict_compiled = eqx.filter_jit(predict)
+
+    @eqx.filter_jit
+    def score_episode(model, context_rows, ids, episode):
+        logits = episode_logits(model, context_rows, ids, episode)
+        return (
+            model.distribution.mean(logits),
+            model.distribution.loss(logits, episode.targets),
+        )
+
     draw_compiled = jax.jit(draw_episode, static_argnums=2)
     rows = []
     for index in range(args.test_episodes):
         episode = draw_compiled(
             jax.random.fold_in(test, index), context_rows, query_count
         )
-        prediction = predict_compiled(model, context_rows, ids, episode)
+        prediction, nll = score_episode(model, context_rows, ids, episode)
+        nll = float(nll)
+        if not np.isfinite(nll):
+            raise ValueError(f"Nonfinite negative log-density for test episode {index}")
         oracle = oracle_predict(host_context, gram, episode, index)
-        rows.append(episode_metrics(index, episode, prediction, oracle))
+        rows.append(
+            episode_metrics(index, episode, prediction, oracle) | {"navi_nll": nll}
+        )
 
     with (args.output_dir / "episodes.csv").open("w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=list(rows[0]))
@@ -244,7 +257,11 @@ def run(args):
         "selected_step": best_step,
     }
     for name, payload in (
-        ("summary.json", summarize(rows, bootstrap)),
+        (
+            "summary.json",
+            summarize(rows, bootstrap)
+            | {"navi_nll": float(np.mean([row["navi_nll"] for row in rows]))},
+        ),
         ("run.json", metadata),
     ):
         (args.output_dir / name).write_text(
