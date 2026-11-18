@@ -24,3 +24,13 @@ changing them. The application architecture has not yet been established.
 ## Application code and tests
 
 Locations and responsibilities remain to be defined as the project develops.
+
+## Design notes
+
+- `impl/pfn/` — PFN and TabPFN design notes covering theory, task priors,
+  loss, Transformer architecture, and inference.
+- `impl/transformer/` — efficient Transformer variants and upstream JAX
+  implementation references.
+- `impl/pfn_pytorch/PFNs/` — pinned upstream PFNs PyTorch reference submodule.
+- `impl/pfn_pytorch/README.md` — module map and reuse guide for the pinned checkout.
+- `impl/navi/model_draft.md` — generic Navi architecture and PFNs reuse boundaries.

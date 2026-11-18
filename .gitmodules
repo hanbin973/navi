@@ -1,0 +1,3 @@
+[submodule "impl/pfn_pytorch"]
+	path = impl/pfn_pytorch/PFNs
+	url = https://github.com/SamuelGabriel/PFNs

@@ -7,8 +7,8 @@
   cluster configurations.
 - Use Slurm account `jonth0` and notification address `hblee@umich.edu`.
   The templates request email on job start and end, following the school example.
-- Every job on `spgpu` must explicitly request GPUs with `--gpus=X`. The GPU
-  smoke template requests one GPU; adjust the count to the job's needs.
+- The `spgpu` partition uses NVIDIA A40 GPUs with 48 GB of memory per GPU.
+  Set `--gpus=1` unless a different count is explicitly requested.
 - Do not run substantial computations on the login node. Follow the site's
   filesystem policy; do not recursively search shared roots or other allocations.
 - Do not poll Slurm in loops or with `watch`; check at most once per minute, or
@@ -31,8 +31,7 @@
 ## Decisions needed
 
 - QoS, time, memory, and CPU requirements and limits; GPU count limits.
-- Required modules, environment variables, GPU driver/CUDA compatibility, and
-  how uv and the prepared environment are available on compute nodes.
+- Required modules, environment variables, and GPU driver/CUDA compatibility.
 - Approved output, checkpoint, and dataset locations and retention policy.
 - Whether allocations should be charged or job submissions require additional
   user authorization in the relevant environment.
