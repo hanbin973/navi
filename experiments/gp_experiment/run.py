@@ -18,13 +18,28 @@ from .data import draw_episode, query_features
 from .evaluation import episode_metrics, oracle_predict, summarize
 
 
-def predict(model, context_rows, ids, episode):
+def episode_logits(model, context_rows, ids, episode):
     u, kappa = query_features(context_rows, episode.query_rows)
-    return model(episode.observed[:, None], ids, u, kappa).squeeze(-1)
+    return model(episode.observed[:, None], ids, u, kappa)
+
+
+def predict(model, context_rows, ids, episode):
+    return model.distribution.mean(episode_logits(model, context_rows, ids, episode))
 
 
 def loss(model, context_rows, ids, episode):
-    return jnp.mean((predict(model, context_rows, ids, episode) - episode.targets) ** 2)
+    logits = episode_logits(model, context_rows, ids, episode)
+    return model.distribution.loss(logits, episode.targets)
+
+
+def prior_bin_edges(key, context_rows):
+    # Query targets are independent of the fixed context design. Reuse the
+    # simulator with an empty context to avoid drawing unneeded observations.
+    keys = jax.random.split(key, 64)
+    targets = jax.lax.map(
+        lambda key: draw_episode(key, context_rows[:0], 128).targets, keys
+    )
+    return np.quantile(np.asarray(targets), np.linspace(0, 1, 33)).tolist()
 
 
 def make_train_step(optimizer, query_count):
@@ -52,6 +67,7 @@ def parse_args(argv=None):
     parser.add_argument("--n", type=int, default=2000)
     parser.add_argument("--p", type=int, default=2000)
     parser.add_argument("--n-context", type=int, default=1600)
+    parser.add_argument("--query-depth", type=int, default=1)
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--validate-every", type=int, required=True)
     parser.add_argument("--validation-episodes", type=int, default=32)
@@ -63,6 +79,7 @@ def parse_args(argv=None):
     if (
         min(
             args.p,
+            args.query_depth,
             args.steps,
             args.validate_every,
             args.validation_episodes,
@@ -70,7 +87,9 @@ def parse_args(argv=None):
         )
         < 1
     ):
-        parser.error("feature, step, cadence, and episode counts must be positive")
+        parser.error(
+            "feature, depth, step, cadence, and episode counts must be positive"
+        )
     if not 0 <= args.seed < 2**32:
         parser.error("--seed must be in [0, 2**32)")
     return args
@@ -91,11 +110,11 @@ def run(args):
         "context_size": 1,
         "query_size": 1,
         "pair_size": 1,
-        "out_size": 1,
+        "bin_edges": prior_bin_edges(jax.random.fold_in(train, 0), context_rows),
         "num_ids": args.n_context,
         "width": 32,
         "num_heads": 4,
-        "query_depth": 1,
+        "query_depth": args.query_depth,
     }
     model = Navi(**model_settings, key=init)
     learning_rate = 1e-3
@@ -115,7 +134,7 @@ def run(args):
     ]
 
     def evaluate_validation(model, step):
-        mse = float(
+        nll = float(
             np.mean(
                 [
                     float(validation_loss(model, key, context_rows, ids))
@@ -123,28 +142,28 @@ def run(args):
                 ]
             )
         )
-        if not np.isfinite(mse):
-            raise ValueError(f"Nonfinite validation MSE at step {step}")
-        return mse
+        if not np.isfinite(nll):
+            raise ValueError(f"Nonfinite validation NLL at step {step}")
+        return nll
 
     checkpoint = args.output_dir / "best.eqx"
     best_loss = np.inf
     best_step = None
-    history = [{"step": 0, "mse": evaluate_validation(model, 0)}]
+    history = [{"step": 0, "nll": evaluate_validation(model, 0)}]
     training_history = []
     for step in range(1, args.steps + 1):
-        model, state, training_mse, finite = train_step(
+        model, state, training_nll, finite = train_step(
             model, state, jax.random.fold_in(train, step), context_rows, ids
         )
-        training_mse, finite = jax.device_get((training_mse, finite))
+        training_nll, finite = jax.device_get((training_nll, finite))
         if not finite:
             raise ValueError(f"Nonfinite training loss or gradient at update {step}")
-        training_history.append({"step": step, "mse": float(training_mse)})
+        training_history.append({"step": step, "nll": float(training_nll)})
         if step % args.validate_every == 0 or step == args.steps:
-            validation_mse = evaluate_validation(model, step)
-            history.append({"step": step, "mse": validation_mse})
-            if validation_mse < best_loss:
-                best_loss, best_step = validation_mse, step
+            validation_nll = evaluate_validation(model, step)
+            history.append({"step": step, "nll": validation_nll})
+            if validation_nll < best_loss:
+                best_loss, best_step = validation_nll, step
                 with checkpoint.open("wb") as file:
                     eqx.tree_serialise_leaves(file, model)
 

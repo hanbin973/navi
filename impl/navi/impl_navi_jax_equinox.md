@@ -6,16 +6,15 @@ Implement the model in [model_draft.md](model_draft.md) as native Equinox
 modules. The PFNs submodule at `f04d3cad1d4d464f1039ec04d55b8f004b60494a`
 is the behavioral reference for the supported Transformer operations.
 Port the row-only context block and the attention, MLP, and LayerNorm
-operations needed by the query block. The feature builders, task semantics,
-decoder interpretation, and loss belong to callers. The first milestone
+operations needed by the query block. Callers supply features, targets,
+and bin edges for the planned default PFNs head. The first milestone
 covers ordinary dense MHA in FP32, a common context length per batch, and
 explicit context-state reuse. Full PFNs checkpoint import, feature-axis
 attention, upstream mutable K/V caching, and task-specific training
 pipelines are outside this milestone.
 
-The repository currently has starter code and no model package. Create
-`navi/model.py` and `navi/__init__.py` for the implementation, with focused
-tests under `tests/`. Current uv dependencies already include JAX and
+The original milestone added `navi/model.py` and `navi/__init__.py`, with
+focused tests under `tests/`. Current uv dependencies already include JAX and
 Equinox. Use a separate uv environment for generating PyTorch reference
 data if needed, keeping PyTorch out of Navi's runtime dependencies. This
 document authorizes no code changes or scheduler jobs by itself.
@@ -91,7 +90,7 @@ and supports differentiating the combined call across episodes.
 - Project query features and build each layer's pair memory using a
   two-linear-layer MLP over concatenated context state and pair
   features. Apply the ported post-norm block and a configurable per-token
-  head. Start with a linear default head. Keep projection weights,
+  head. The original linear head was superseded in milestone 4. Keep projection weights,
   context layers, pair encoders, and query layers as Equinox parameters.
   Use a fixed module tuple for independently parameterized layers.
 - Add `tests/test_navi_model.py`. Verify output shape and reject invalid
@@ -136,6 +135,54 @@ git diff --check
   and [uv environment workflow](../../harness/environment.md). Adapt the GPU template to run the focused checks instead of its
   device-only smoke command. GPU support remains unverified until those
   checks pass.
+
+## 4. Make the PFNs bar head the default for regression
+
+**State:** Complete. The root CPU suite passed all 43 tests with
+`JAX_PLATFORMS=cpu uv run --locked --no-sync pytest -q` in the prepared
+project environment. Ruff lint, Ruff format, and `git diff --check`
+passed. GPU training was outside this verification run.
+
+1. Port the supported subset of PFNs `FullSupportBarDistribution` using the
+   [pinned source](../pfn_pytorch/PFNs/pfns/model/bar_distribution.py).
+   Validate at least three finite, strictly increasing edges after conversion
+   to FP32. Keep edges as fixed configuration shared by the loss and readout,
+   outside the differentiated array leaves and optimizer state. Evaluate
+   per-target log density using log-softmax, JAX bucket lookup and gather,
+   and the uniform or half-normal density for the selected bar. Reject invalid target shapes,
+   nonfinite targets, and empty loss reductions. Expose the predictive mean
+   using the same distribution parameters.
+2. Use the PFNs two-layer GELU decoder in `navi/model.py` to emit one logit
+   per bar, with output width derived from the edge count.
+   Keep the explicit custom-head path and its output-width contract. Keep
+   target values outside context encoding and query decoding. In the Gaussian
+   runner, determine edges from the training prior before optimization and
+   share them between training, validation, and inference. Optimize mean
+   query negative log-density, use validation negative log-density for model
+   selection, and use the predictive mean for existing Navi/BLUP point
+   metrics. Existing scalar decoder checkpoints require retraining for
+   the default bar head.
+3. Keep the existing CPU model test and extend its batched-versus-loop
+   training check to use scalar targets and the bar loss under
+   `eqx.filter_jit` and `eqx.filter_value_and_grad`. Check FFN/attention
+   gradient parity through the existing comparison and include the head,
+   pair encoder, context encoder, and ID table. Check the loss and mean
+   against independent expected values for unequal widths, exact edges and
+   both tails, and compare logit gradients with softmax minus the target
+   bar indicator. Retain all existing query semantics and primitive
+   parity checks. Update the Gaussian runner CPU smoke check to exercise
+   the distribution loss and verify finite point metrics.
+
+Run from the repository root. The focused model command is the same as
+in milestone 2.
+
+```sh
+JAX_PLATFORMS=cpu uv run --locked pytest -q tests/test_navi_model.py
+JAX_PLATFORMS=cpu uv run --locked pytest -q
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+git diff --check
+```
 
 ## Execution record
 

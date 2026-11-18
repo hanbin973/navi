@@ -82,12 +82,13 @@ information and Navi's approximation error.
 Add `experiments/gp_experiment/run.py` and run it as a module from the
 repository root. This depends on task 1. Wire in task 2 for the final test pass.
 
-- Configure `Navi` with single-channel context, query, pair, and output
-  features, `num_ids=n_context`, width 32, four heads, and one query layer.
-  Call `Navi` directly with the fixed context IDs and the query features
-  computed from the same episode draw as the targets. Remove the singleton
-  output axis before comparing with `g_Q`. Model inputs are context
-  phenotypes, IDs, and unscaled Gram features.
+- Configure `Navi` with single-channel context, query, and pair features,
+  `num_ids=n_context`, width 32, four heads, and one query layer by default.
+  Fit 32 bars from 8,192 simulated training-prior targets using the training
+  key at index 0. Save the edges with the model settings. Train the default
+  head on query negative log-density and use its predictive mean for test
+  point metrics. Model inputs are context phenotypes, IDs, and unscaled
+  Gram features.
 - Build one `eqx.filter_jit` training step using
   `eqx.filter_value_and_grad` and Optax Adam at `1e-3`. Update trainable
   arrays with `eqx.apply_updates`. Use one fresh episode per update,
@@ -97,15 +98,15 @@ repository root. This depends on task 1. Wire in task 2 for the final test pass.
   `--validate-every`, `--validation-episodes`, `--test-episodes`, and
   `--output-dir`. Require the step count, validation cadence, and output
   directory. Default the master seed to 0 and validation to 32 episodes.
-  Record validation MSE at step 0 using the same validation episodes as
+  Record validation negative log-density at step 0 using the same validation episodes as
   later checks. Validate at the requested cadence and after the final update.
   Select the checkpoint from the post-update validations. Serialize
-  the checkpoint with the lowest mean validation latent MSE using Equinox
+  the checkpoint with the lowest mean validation negative log-density using Equinox
   leaf serialization, keeping the earlier checkpoint on ties. Reload it
   into the same model structure for the final test pass.
 - Write `best.eqx`, `run.json`, `episodes.csv`, and `summary.json`.
   Record the resolved settings, seed, device, wall-clock time, validation
-  history, pre-update training MSE for each update, and selected step in
+  history, pre-update training negative log-density for each update, and selected step in
   `run.json`. Require a fresh run directory
   to prevent artifacts from different runs being mixed.
 
@@ -180,3 +181,17 @@ and the reported uncertainty interval. There is no required MSE gap size.
   latent MSE was 1.29400 for Navi and 0.78497 for oracle BLUP. The mean
   paired difference was 0.50904, with a 95% episode-bootstrap interval of
   [0.40080, 0.62580]. Mean squared prediction disagreement was 0.50425.
+- Depth-3 comparison submitted as Slurm job `66356387` on
+  `spgpu,gpu_mig40` with a 15-minute limit. It uses two context layers and
+  three query layers, with the original main run's seed, update count,
+  validation cadence, and test count. The scratch output directory is
+  `main-depth3-66356387/` and the log is `slurm-66356387.out`.
+  The reduced-size CPU runner test passed at depth 3. Slurm reported
+  `COMPLETED` with exit code `0:0` after 6 minutes 29 seconds on `spgpu`.
+  All 10,000 training losses and 100 test rows are present. Validation
+  MSE fell from 2.04820 at step 0 to 1.41141 at step 500 and reached
+  1.41098 at the selected step 9,000. Training MSE averaged 1.37662 over
+  the first 1,000 updates and 1.40457 over the final 1,000. Test latent
+  MSE was 1.29400 for Navi and 0.78497 for BLUP. The paired gap was
+  0.50903 (95% bootstrap interval [0.40077, 0.62581]). Mean within-episode
+  Pearson correlations were 0.00071 for Navi and 0.55266 for BLUP.

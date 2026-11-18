@@ -42,21 +42,22 @@ generate `g_Q`. Use an experiment-local simulator to draw the episode
 jointly and retain its sampled variances and query rows for evaluation.
 
 Use `Navi` configured for a single
-context value, one query feature, one pair feature, one output, and 1,600
-IDs. The model receives `y_C[:, None]`, the context IDs, the query diagonal
+context value, one query feature, one pair feature, 32 bar logits, and
+1,600 IDs. The model receives `y_C[:, None]`, the context IDs, the query diagonal
 of `K` with shape `(400, 1)`, and `K[Q, C]` (the query-by-context block)
 with shape `(400, 1600, 1)`. Keep the Gram features unscaled by the sampled
 variances so Navi learns to predict with the variances latent. Recompute
 the query diagonal and `kappa = K_QC[..., None]` for each episode.
-Squeeze only the last prediction axis before computing
-mean squared error against `g_Q`.
+Set the bar edges from simulated training-prior target quantiles. Train
+with mean query negative log-density against `g_Q` and use the predictive
+mean for point metrics.
 
 Use Optax Adam with an initial learning rate of `1e-3`. Start with width 32,
 four attention heads, one query layer, and one episode per optimizer step.
 Check a full-size forward and backward step on an allocated GPU before
 setting the training budget. Record the update budget and validation cadence
-before the main run, and retain the checkpoint with the lowest latent
-validation MSE.
+before the main run, and retain the checkpoint with the lowest mean
+validation negative log-density.
 
 ## Evaluate against oracle BLUP
 

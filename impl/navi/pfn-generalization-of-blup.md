@@ -210,7 +210,7 @@ $$
 q_\phi(f_* \mid y, \kappa_*) = \mathrm{head}_\phi\big( q^{(L)} \big)
 $$
 
-The head outputs a full distribution, because under non-Gaussian priors the predictive distribution has no fixed shape. The point prediction is its mean. A later subsection gives one concrete head.
+The head outputs a full distribution, because under non-Gaussian priors the predictive distribution has no fixed shape. The [default bar head](#default-output-a-pfns-bar-distribution) supplies this density and its mean for point prediction.
 
 ### Attention pattern and information flow
 
@@ -302,53 +302,32 @@ The kernel values are joined with the context state before attention, not added 
 
 The attention scores are computed on the fly and need not be stored. A cohort too large for $n^2$ computation per layer would need an approximation, such as context tokens that interact through a smaller set of latent tokens.
 
-### Example: a binned predictive distribution
+### Default output: a PFNs bar distribution
 
-One concrete choice for $q_\phi$ is a categorical distribution over bins of the genetic value, which turns the prediction into a classification over $J$ intervals. This is the construction PFNs use for regression.
+Express the simulated genetic value on the standardized phenotype scale,
+$\tilde f_*=(f_*-\bar y)/\mathrm{sd}(y)$. Fix the reference edges before
+training, for example from quantiles of simulated targets on this scale.
 
-**Scale.** Genetic values change scale with the prior hyperparameters, so the phenotypes are standardized per trait and the target is expressed on the same scale:
+The [default Navi head](model_draft.md#default-output-head-and-training-loss)
+maps the final query state to one logit per bar. Softmax gives the bar
+masses $\pi_j$, and the conditional density $f_j$ within a bar is uniform
+for interior bars and half-normal for the two outer bars. The tail bars
+cover the whole real line together with the interior bars.
 
-$$
-\tilde{f}_* = \frac{f_* - \bar{y}}{\mathrm{sd}(y)}
-$$
+For each simulated probe, use $-\log\pi_{j(\tilde f)}-\log f_{j(\tilde f)}(\tilde f)$
+and average across queries. The conditional density term changes the
+reported negative log-density while bin classification supplies the
+gradient with respect to the logits for fixed edges.
 
-**Bins.** Fix edges $b_0 < b_1 < \dots < b_J$ once, before training. A natural choice places them at quantiles of $\tilde{f}$ over many prior draws, so that every bin is equally likely a priori. Bin $j$ is the interval $[b_{j-1}, b_j)$ with width $\Delta_j = b_j - b_{j-1}$.
+The point prediction is the probability-weighted mean of the conditional
+bar means. Compute quantiles, prediction intervals and threshold
+probabilities from the cumulative distribution, including the half-normal
+tails. Multiply point predictions and quantile endpoints by $\mathrm{sd}(y)$
+and add $\bar y$ to recover the original scale.
 
-**Head.** A learned output layer maps the final query state to $J$ logits, and a softmax turns them into bin probabilities:
-
-$$
-\lambda = \mathrm{out}_\phi\big( q^{(L)} \big) \in \mathbb{R}^{J}, \qquad \pi_j = \frac{\exp(\lambda_j)}{\sum_{k=1}^{J} \exp(\lambda_k)}
-$$
-
-**Density.** The probability of each bin is spread evenly over it, which gives a piecewise-constant density:
-
-$$
-q_\phi\big( \tilde{f}_* \mid y, \kappa_* \big) = \frac{\pi_j}{\Delta_j} \qquad \text{for } \tilde{f}_* \in [b_{j-1}, b_j)
-$$
-
-**Loss.** For a probe whose simulated value falls in bin $j(\tilde{f})$, the negative log-density is the cross-entropy of that bin plus a term that does not depend on $\phi$:
-
-$$
--\log q_\phi\big( \tilde{f} \mid y, \kappa \big) = -\log \pi_{j(\tilde{f})} + \log \Delta_{j(\tilde{f})}
-$$
-
-Training is therefore ordinary $J$-class classification of the bin that contains the simulated genetic value.
-
-**What is read off at test time.** With $m_j$ the midpoint of bin $j$, the point prediction and the probability of exceeding a selection threshold $c$ placed at a bin edge are:
-
-$$
-\hat{\tilde{f}}_* = \sum_{j=1}^{J} \pi_j\, m_j, \qquad \Pr\big( \tilde{f}_* > c \big) = \sum_{j \,:\, b_{j-1} \ge c} \pi_j
-$$
-
-Quantiles and prediction intervals come from the cumulative sums of $\pi_j$. Multiplying by $\mathrm{sd}(y)$ and adding $\bar{y}$ returns predictions to the original scale.
-
-Three practical points follow from the construction:
-
-- **Shape:** the head can represent skewed and multimodal distributions. A sparse prior can give two modes, one for a large-effect variant being present and one for its absence, which a Gaussian head would average into one.
-- **Resolution:** the point prediction is accurate only to within the bin widths. More bins give finer resolution but need more draws for each bin to be learned.
-- **Tails:** the two outer bins can be made half-infinite with a fixed tail shape, so that the density is defined for every value and the loss stays finite.
-
-In the Gaussian check the target is a normal distribution centred on the BLUP, with the prediction error variance. The binned head approximates it, and its mean matches the BLUP up to the bin resolution.
+For the Gaussian check, the target predictive distribution is normal
+around the BLUP, with the prediction error variance. Compare the learned
+distribution mean to BLUP on the same target scale.
 
 ### How this generalizes the BLUP formula
 

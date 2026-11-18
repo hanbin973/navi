@@ -2,6 +2,7 @@
 
 import math
 from collections.abc import Callable
+from functools import partial
 from typing import final
 
 import equinox as eqx
@@ -9,6 +10,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
+
+from .distribution import FullSupportBarDistribution
 
 
 @final
@@ -128,6 +131,7 @@ class Navi(eqx.Module):
     query_blocks: tuple[_Block, ...]
     pair_encoders: tuple[_MLP, ...]
     head: Callable[[Array], Array]
+    distribution: FullSupportBarDistribution | None
     pair_size: int = eqx.field(static=True)
     out_size: int = eqx.field(static=True)
 
@@ -137,7 +141,6 @@ class Navi(eqx.Module):
         context_size: int,
         query_size: int,
         pair_size: int,
-        out_size: int,
         num_ids: int,
         width: int,
         num_heads: int,
@@ -145,18 +148,29 @@ class Navi(eqx.Module):
         key: Array,
         hidden_size: int | None = None,
         zero_init: bool = True,
+        bin_edges: Array | tuple[float, ...] | list[float] | None = None,
         head: Callable[[Array], Array] | None = None,
+        out_size: int | None = None,
     ):
         dimensions = {
             "context_size": context_size,
             "query_size": query_size,
             "pair_size": pair_size,
-            "out_size": out_size,
             "num_ids": num_ids,
             "width": width,
             "num_heads": num_heads,
             "query_depth": query_depth,
         }
+        if head is None:
+            if bin_edges is None or out_size is not None:
+                raise ValueError("the default PFNs head requires bin_edges")
+            self.distribution = FullSupportBarDistribution(bin_edges)
+            out_size = self.distribution.num_bars
+        else:
+            if bin_edges is not None:
+                raise ValueError("bin_edges are only used by the default PFNs head")
+            self.distribution = None
+        dimensions["out_size"] = out_size
         if hidden_size is not None:
             dimensions["hidden_size"] = hidden_size
         for name, value in dimensions.items():
@@ -198,7 +212,15 @@ class Navi(eqx.Module):
             for _ in range(query_depth)
         )
         self.head = (
-            eqx.nn.Linear(width, out_size, dtype=jnp.float32, key=next(keys))
+            eqx.nn.MLP(
+                width,
+                out_size,
+                hidden_size,
+                depth=1,
+                activation=partial(jax.nn.gelu, approximate=False),
+                dtype=jnp.float32,
+                key=next(keys),
+            )
             if head is None
             else head
         )
@@ -286,7 +308,8 @@ class Navi(eqx.Module):
 
         **Returns:**
 
-        FP32 outputs of shape (m, out_size).
+        FP32 bar logits of shape (m, num_bars), or outputs of shape
+        (m, out_size) for an explicit custom head.
 
         **Raises:**
 

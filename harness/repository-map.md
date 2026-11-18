@@ -27,7 +27,9 @@ changing them.
 - `navi/model.py` — Equinox episode model and dense PFNs block primitives.
 - `navi/helper.py` — abstract query kernel and dataset simulator interfaces,
   Gaussian reference helpers, and training episode assembly.
-- `navi/__init__.py` — public model import.
+- `navi/distribution.py` — fixed PFNs full-support bars, query loss, and
+  predictive mean.
+- `navi/__init__.py` — public model and distribution imports.
 - `experiments/gp_experiment/` — fixed-context Gaussian episode simulation,
   Navi training runner, and paired evaluation with oracle BLUP.
 - `tests/test_gp_experiment.py` — episode, oracle, and runner checks.
@@ -35,7 +37,7 @@ changing them.
 - `tests/test_navi_helper.py` — kernel alignment, joint simulation, BLUP
   reference, and training episode checks.
 - `tests/test_navi_model.py` — episode validation, context reuse, query
-  semantics, batching, and gradients.
+  semantics, batching, bar-distribution loss, and gradients.
 - `tests/fixtures/` — Torch-free parity data and its CPU PyTorch generator.
 
 ## Design notes

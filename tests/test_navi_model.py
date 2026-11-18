@@ -12,7 +12,7 @@ def make_model(**overrides):
         "context_size": 3,
         "query_size": 2,
         "pair_size": 2,
-        "out_size": 2,
+        "bin_edges": [-1, 0, 2],
         "num_ids": 6,
         "width": 4,
         "num_heads": 2,
@@ -48,7 +48,10 @@ def close(actual, expected):
         {"context_size": 0},
         {"query_size": 0},
         {"pair_size": 0},
-        {"out_size": 0},
+        {"bin_edges": None},
+        {"bin_edges": [-1, 0, 0]},
+        {"bin_edges": [-1, float("inf"), 2]},
+        {"bin_edges": [-1, 2]},
         {"width": 0},
         {"hidden_size": 0},
         {"query_depth": 1.5},
@@ -91,7 +94,9 @@ def test_input_validation(episode):
 
 
 def test_one_layer_and_custom_head(episode):
-    model = make_model(query_depth=1, head=lambda token: token[:2])
+    model = make_model(
+        query_depth=1, bin_edges=None, out_size=2, head=lambda token: token[:2]
+    )
     x, ids, u, pairs = episode
     context = model.encode_context(x, ids)
     assert len(context) == 1
@@ -173,7 +178,7 @@ def test_layer_schedule(episode):
 def test_batched_training_matches_independent_loop(episode):
     model = make_model()
     batch = tuple(jnp.stack([value, value[::-1]]) for value in episode)
-    target = jnp.linspace(-0.3, 0.7, 16).reshape(2, 4, 2)
+    target = jnp.linspace(-1.5, 2.5, 8).reshape(2, 4)
 
     def batched(model, batch):
         return jax.vmap(model)(*batch)
@@ -197,7 +202,7 @@ def test_batched_training_matches_independent_loop(episode):
         @eqx.filter_value_and_grad(has_aux=True)
         def loss(model, batch, target):
             output = forward(model, batch)
-            return jnp.mean((output - target) ** 2), output
+            return model.distribution.loss(output, target), output
 
         return loss(model, batch, target)
 
@@ -209,6 +214,7 @@ def test_batched_training_matches_independent_loop(episode):
         jax.tree.leaves(gradients), jax.tree.leaves(expected_gradients), strict=True
     ):
         close(actual, reference)
+    assert jnp.linalg.norm(gradients.head.layers[-1].weight) > 0
     assert jnp.linalg.norm(gradients.pair_encoders[0].linear1.weight) > 0
     assert jnp.linalg.norm(gradients.context_blocks[0].attention.w_out) > 0
     assert jnp.linalg.norm(gradients.context_projection.weight) > 0
@@ -216,3 +222,54 @@ def test_batched_training_matches_independent_loop(episode):
     np.testing.assert_array_equal(
         gradients.id_embedding.weight[jnp.array([0, 2, 5])], 0
     )
+
+
+def test_full_support_bar_density_mean_and_gradient():
+    distribution = make_model(bin_edges=[-3, -1, 2, 6]).distribution
+    logits = jnp.array([0.4, -0.3, 1.0])
+    targets = jnp.array([-5.0, -3.0, -1.0, 0.0, 2.0, 6.0, 8.0])
+    selected = np.array([0, 0, 0, 1, 1, 2, 2])
+    logits_per_target = jnp.broadcast_to(logits, (targets.size, logits.size))
+    masses = np.exp(np.asarray(logits))
+    masses /= masses.sum()
+    left_scale, right_scale = np.array([2.0, 4.0]) / 0.6744897501960817
+    normalizer = np.sqrt(2 / np.pi)
+    conditional = np.array(
+        [
+            normalizer / left_scale * np.exp(-0.5 * (4 / left_scale) ** 2),
+            normalizer / left_scale * np.exp(-0.5 * (2 / left_scale) ** 2),
+            normalizer / left_scale,
+            1 / 3,
+            1 / 3,
+            normalizer / right_scale * np.exp(-0.5 * (4 / right_scale) ** 2),
+            normalizer / right_scale * np.exp(-0.5 * (6 / right_scale) ** 2),
+        ]
+    )
+    expected = -np.log(masses[selected] * conditional)
+    close(
+        jax.jit(distribution.negative_log_density)(logits_per_target, targets), expected
+    )
+    close(distribution.loss(logits_per_target, targets), expected.mean())
+    close(
+        jax.jit(jax.grad(distribution.loss))(logits_per_target, targets),
+        (masses - np.eye(3)[selected]) / targets.size,
+    )
+    close(
+        jax.jit(distribution.mean)(logits),
+        masses
+        @ np.array([-1 - left_scale * normalizer, 0.5, 2 + right_scale * normalizer]),
+    )
+
+
+def test_bar_loss_rejects_invalid_targets():
+    distribution = make_model().distribution
+    with pytest.raises(ValueError, match="leading shape"):
+        distribution.loss(jnp.zeros((2, 2)), jnp.zeros((2, 1)))
+    with pytest.raises(ValueError, match="at least one"):
+        distribution.loss(jnp.zeros((0, 2)), jnp.zeros(0))
+    with pytest.raises(ValueError, match="finite"):
+        distribution.loss(jnp.zeros(2), jnp.nan)
+    with pytest.raises(eqx.EquinoxRuntimeError, match="finite"):
+        eqx.filter_jit(distribution.loss)(
+            jnp.zeros(2), jnp.array(jnp.inf)
+        ).block_until_ready()

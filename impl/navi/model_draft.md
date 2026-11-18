@@ -3,8 +3,9 @@
 Navi encodes a fixed set of identified context items once per episode.
 Each query reads the context through its own attention memory, built by
 combining context states with query–context feature vectors. The network
-takes numeric features and returns one output vector per query. The
-caller provides the feature construction, target interpretation, and loss.
+takes numeric features and defaults to a PFNs bar-distribution head for
+scalar regression. The caller supplies features, training targets, and
+fixed bin edges on the target scale.
 
 The architecture has two paths. A row-wise Transformer contextualizes
 observations from the fixed set of items. A query stack uses those states
@@ -22,7 +23,7 @@ $d$ the model width.
 | Context IDs | $n$ | Stable indices into a learned table for the fixed set of context items |
 | Query features $U$ | $m\times d_u$ | One feature vector $u_j$ per query |
 | Pair features $\kappa$ | $m\times n\times d_\kappa$ | One generic feature vector $\kappa_{ji}$ for query $j$ and context item $i$ |
-| Output $Z$ | $m\times d_{\mathrm{out}}$ | One vector per query from the configured head |
+| Output $Z$ | $m\times K$ | One logit per bar and query for the default head |
 
 The context axis of $\kappa$ follows the same order as $X$ and the context
 IDs. Its query axis follows $U$. IDs identify items independently of their
@@ -86,8 +87,40 @@ attention API, the query state is the input and the pair tensor is the
 separate source for both K and V. Flatten episode and query axes into a
 batch of independent reads. Each read has one query token and $n$ memory
 tokens. Use upstream residual addition or explicit addition once per
-sublayer. The configurable decoder $D$ maps width $d$ to
-$d_{\mathrm{out}}$.
+sublayer.
+
+## Default output head and training loss
+
+Use the PFNs decoder with two linear layers and GELU between them, shared
+across queries. It maps each final query state to $K$ logits.
+Pass $K+1$ finite, strictly increasing reference edges $b_0,\ldots,b_K$
+as the `bin_edges` argument to `Navi`, with $K\ge 2$. Estimate the edges once, for example from
+training-prior target quantiles, and reuse them in training and inference.
+Use `model.distribution.loss(logits, targets)` for training and
+`model.distribution.mean(logits)` for point predictions. An explicit
+custom `head` takes an `out_size` and uses a caller-defined objective.
+
+Follow the pinned PFNs [full-support bar distribution](../pfn_pytorch/PFNs/pfns/model/bar_distribution.py).
+Softmax gives the bar masses $\pi_k$. For each interior bar the
+conditional density $f_k(y)$ is uniform with width $b_k-b_{k-1}$.
+The first and last bars are outward-facing half-normal densities anchored
+at $b_1$ and $b_{K-1}$. Set each tail scale to its reference width divided
+by the median of a unit half-normal, so half of each tail bar's mass lies
+within its reference interval. Use the upstream bucket convention, which
+assigns an exact interior edge to the bar on its left.
+
+For a nonempty episode with finite scalar targets $y_j$, minimize the
+mean negative log-density over queries:
+
+$$
+\mathcal L=-\frac{1}{m}\sum_{j=1}^{m}
+ \left[\log\pi_{k(y_j)}(z_j)+\log f_{k(y_j)}(y_j)\right].
+$$
+
+Use log-softmax and gather the selected bar. Compute both the loss and
+distribution mean from the same edges and tail scales. The mean weights
+interior midpoints and half-normal means by their respective bar masses.
+Point-metric comparisons such as BLUP use this distribution mean.
 
 ## Reuse and execution
 
@@ -97,7 +130,7 @@ $d_{\mathrm{out}}$.
 | Context Transformer | Reuse row-only `PerFeatureLayer` |
 | Query block primitives | Reuse `MultiHeadAttention`, `MLP`, and `LayerNorm` |
 | Query-specific memory | Add the pair encoder and the wrapper that aligns, batches, and reads the pair features |
-| Decoder and training | Supply a head and loss for the task. Adapt episode sampling and supervision at the training boundary |
+| Decoder and training | Share the fixed PFNs bar distribution between the default loss and inference. Supply task-specific episode sampling and supervision |
 
 The wrapper owns context ID lookup, layerwise state capture, and query
 assembly. Context states depend on the context observations, IDs, and
@@ -120,3 +153,6 @@ query attention uses $O(mn)$ score work per query block.
   Confirm that query outputs are invariant within numerical tolerance.
 - Check that a single query gives the same output alone or in a chunk,
   and that reordering queries reorders outputs correspondingly.
+- On CPU, compare bar losses and means with a reference for unequal widths,
+  exact edges, and both tails. Compare batched and per-query losses and
+  parameter gradients under JIT.

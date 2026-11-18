@@ -10,7 +10,13 @@ import pytest
 
 from experiments.gp_experiment.data import draw_episode, query_features
 from experiments.gp_experiment.evaluation import oracle_predict, summarize
-from experiments.gp_experiment.run import make_train_step, parse_args, predict, run
+from experiments.gp_experiment.run import (
+    loss,
+    make_train_step,
+    parse_args,
+    predict,
+    run,
+)
 from navi import Navi
 
 
@@ -88,7 +94,7 @@ def test_compiled_update_changes_parameters():
         context_size=1,
         query_size=1,
         pair_size=1,
-        out_size=1,
+        bin_edges=[-2, 0, 2],
         num_ids=3,
         width=8,
         num_heads=2,
@@ -99,14 +105,14 @@ def test_compiled_update_changes_parameters():
     params = eqx.filter(model, eqx.is_inexact_array)
     context = jax.random.normal(jax.random.key(1), (3, 4))
     ids = jnp.arange(3)
-    updated, _, training_mse, finite = make_train_step(optimizer, 2)(
+    updated, _, training_nll, finite = make_train_step(optimizer, 2)(
         model, optimizer.init(params), jax.random.key(2), context, ids
     )
     assert bool(finite)
     episode = draw_episode(jax.random.key(2), context, 2)
     old_prediction = predict(model, context, ids, episode)
-    assert float(training_mse) == pytest.approx(
-        float(jnp.mean((old_prediction - episode.targets) ** 2)), rel=1e-5
+    assert float(training_nll) == pytest.approx(
+        float(loss(model, context, ids, episode)), rel=1e-5
     )
     new_prediction = predict(updated, context, ids, episode)
     assert new_prediction.shape == episode.targets.shape
@@ -123,6 +129,8 @@ def test_runner_smoke(tmp_path):
             "6",
             "--n-context",
             "5",
+            "--query-depth",
+            "3",
             "--steps",
             "2",
             "--validate-every",
@@ -137,8 +145,10 @@ def test_runner_smoke(tmp_path):
     )
     run(args)
     metadata = json.loads((output / "run.json").read_text())
+    assert metadata["model"]["query_depth"] == 3
+    assert np.all(np.diff(metadata["model"]["bin_edges"]) > 0)
     assert [row["step"] for row in metadata["training_history"]] == [1, 2]
-    assert all(np.isfinite(row["mse"]) for row in metadata["training_history"])
+    assert all(np.isfinite(row["nll"]) for row in metadata["training_history"])
     summary = json.loads((output / "summary.json").read_text())
     with (output / "episodes.csv").open() as file:
         rows = list(csv.DictReader(file))
@@ -146,7 +156,7 @@ def test_runner_smoke(tmp_path):
     assert [baseline["step"], *(row["step"] for row in trained_history)] == [0, 1, 2]
     assert (
         metadata["selected_step"]
-        == min(trained_history, key=lambda row: row["mse"])["step"]
+        == min(trained_history, key=lambda row: row["nll"])["step"]
     )
     assert len(rows) == summary["test_episodes"] == 3
     assert (output / "best.eqx").stat().st_size > 0
@@ -159,14 +169,15 @@ def test_runner_smoke(tmp_path):
     context = jax.random.normal(design, (args.n_context, args.p), dtype=jnp.float32)
     ids = jnp.arange(args.n_context, dtype=jnp.int32)
     model = Navi(**metadata["model"], key=init)
-    initial_errors = []
+    assert len(model.context_blocks) == 2
+    assert len(model.query_blocks) == 3
+    initial_losses = []
     for index in range(args.validation_episodes):
         episode = draw_episode(
             jax.random.fold_in(validation, index), context, args.n - args.n_context
         )
-        error = predict(model, context, ids, episode) - episode.targets
-        initial_errors.append(float(jnp.mean(error**2)))
-    assert baseline["mse"] == pytest.approx(np.mean(initial_errors), rel=1e-5)
+        initial_losses.append(float(loss(model, context, ids, episode)))
+    assert baseline["nll"] == pytest.approx(np.mean(initial_losses), rel=1e-5)
     with (output / "best.eqx").open("rb") as file:
         model = eqx.tree_deserialise_leaves(file, model)
 
@@ -175,12 +186,23 @@ def test_runner_smoke(tmp_path):
         error = predict(model, context, ids, episode) - episode.targets
         return episode, float(jnp.mean(error**2))
 
-    validation_mses = [
-        check_episode(jax.random.fold_in(validation, index))[1]
+    validation_nlls = [
+        float(
+            loss(
+                model,
+                context,
+                ids,
+                draw_episode(
+                    jax.random.fold_in(validation, index),
+                    context,
+                    args.n - args.n_context,
+                ),
+            )
+        )
         for index in range(args.validation_episodes)
     ]
-    assert np.mean(validation_mses) == pytest.approx(
-        min(item["mse"] for item in trained_history), rel=1e-5
+    assert np.mean(validation_nlls) == pytest.approx(
+        min(item["nll"] for item in trained_history), rel=1e-5
     )
     host_context = np.asarray(context, dtype=np.float64)
     gram = host_context @ host_context.T / args.p

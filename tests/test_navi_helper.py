@@ -102,7 +102,7 @@ def test_training_episode(reference, query_rows):
         context_size=1,
         query_size=2,
         pair_size=2,
-        out_size=1,
+        bin_edges=[-2, 0, 2],
         num_ids=5,
         width=4,
         num_heads=2,
