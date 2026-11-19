@@ -17,6 +17,7 @@ class BayesReadout(eqx.Module):
 
     context_projection: eqx.nn.Linear
     state_width: int = eqx.field(static=True)
+    use_draw_count: bool = eqx.field(static=True)
     context_blocks: tuple[_Block, ...]
     query_projection: eqx.nn.Linear
     query_blocks: tuple[_Block, ...]
@@ -27,7 +28,17 @@ class BayesReadout(eqx.Module):
     gram_bias: eqx.nn.Linear | None
     out_size: int = eqx.field(static=True)
 
-    def __init__(self, *, state_width=0, exact_kernel=False, key, **settings):
+    def __init__(
+        self,
+        *,
+        state_width=0,
+        exact_kernel=False,
+        use_draw_count=False,
+        key,
+        **settings,
+    ):
+        if use_draw_count and not exact_kernel:
+            raise ValueError("draw-count conditioning requires a supplied kernel")
         if exact_kernel and settings["query_depth"] < 2:
             raise ValueError(
                 "exact-kernel conditioning requires query depth of at least 2"
@@ -36,7 +47,9 @@ class BayesReadout(eqx.Module):
             raise ValueError("state and exact-kernel conditioning are separate modes")
         base_key, _, gram_key = jax.random.split(key, 3)
         base = Navi(
-            context_size=2 if exact_kernel or state_width else 1,
+            context_size=1
+            + int(bool(exact_kernel or state_width))
+            + int(use_draw_count),
             query_size=1,
             pair_size=1,
             num_ids=1,
@@ -53,6 +66,7 @@ class BayesReadout(eqx.Module):
         self.distribution = base.distribution
         self.out_size = base.out_size
         self.state_width = state_width
+        self.use_draw_count = use_draw_count
         self.gram_bias = (
             eqx.nn.Linear(
                 1,
@@ -65,7 +79,7 @@ class BayesReadout(eqx.Module):
             else None
         )
 
-    def encode_context(self, y, *, state=None, step=None, gram=None):
+    def encode_context(self, y, *, state=None, step=None, gram=None, draw_count=None):
         """Encode the context for reuse across query batches.
 
         The recurrent state supplies a Gram matrix. The step argument is
@@ -85,6 +99,9 @@ class BayesReadout(eqx.Module):
             y = jnp.concatenate((y, jnp.diag(gram)[:, None]), axis=1)
             bias = jax.vmap(jax.vmap(self.gram_bias))(gram[..., None])
             bias = bias.transpose(2, 0, 1)[None]
+        if self.use_draw_count:
+            count_feature = 1 / (1 + jnp.asarray(draw_count, dtype=y.dtype))
+            y = jnp.concatenate((y, jnp.broadcast_to(count_feature, (n, 1))), axis=1)
         tokens = jax.vmap(self.context_projection)(y)
         return _encode_tokens(tokens, self.context_blocks, bias=bias)
 
@@ -95,15 +112,19 @@ class BayesReadout(eqx.Module):
         pair_features = _features(pair_features, (u.shape[0], n, 1), "pair features")
         return _decode_tokens(self, context, u, pair_features)
 
-    def __call__(self, y, u, pair_features, *, state=None, step=None, gram=None):
-        context = self.encode_context(y, state=state, step=step, gram=gram)
+    def __call__(
+        self, y, u, pair_features, *, state=None, step=None, gram=None, draw_count=None
+    ):
+        context = self.encode_context(
+            y, state=state, step=step, gram=gram, draw_count=draw_count
+        )
         return self.decode_queries(context, u, pair_features)
 
-    def read_state(self, y, u, pair_features, state, step):
+    def read_state(self, y, u, pair_features, state, step, *, draw_count=None):
         """Read a recurrent feature matrix or a pairwise second moment."""
         if self.state_width:
             return self(y, u, pair_features, state=state, step=step)
-        return self(y, u, pair_features, gram=state)
+        return self(y, u, pair_features, gram=state, draw_count=draw_count)
 
 
 @final
@@ -151,7 +172,8 @@ class PairwiseUpdate(eqx.Module):
         return jnp.zeros((n, n), dtype=jnp.float32)
 
     def drift(self, state, draw, y):
-        return jnp.outer(draw, draw) - state
+        block = jnp.atleast_2d(draw)
+        return (block.T @ block) / block.shape[0] - state
 
     def step(self, state, draw, y, step):
         drift = self.drift(state, draw, y)
@@ -167,6 +189,7 @@ def rollout_loss(update, readout, y, u, pairs, targets, draws, horizon):
     """Average marginal PFN log loss over the selected rollout steps."""
     steps = jnp.arange(1, draws.shape[0] + 1, dtype=jnp.int32)
     selected = prefix_mask(steps, horizon)
+    block_size = draws.shape[1] if draws.ndim == 3 else 1
 
     def advance(state, inputs):
         draw, step, score = inputs
@@ -176,7 +199,10 @@ def rollout_loss(update, readout, y, u, pairs, targets, draws, horizon):
         nll = jax.lax.cond(
             score,
             lambda: readout.distribution.loss(
-                readout.read_state(y, u, pairs, state, step), targets
+                readout.read_state(
+                    y, u, pairs, state, step, draw_count=step * block_size
+                ),
+                targets,
             ),
             lambda: jnp.float32(0),
         )

@@ -2,6 +2,8 @@
 #SBATCH --job-name=navi-bayes-update
 #SBATCH --partition=spgpu
 #SBATCH --account=jonth0
+#SBATCH --mail-user=hblee@umich.edu
+#SBATCH --mail-type=BEGIN,END
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=32G
@@ -14,4 +16,4 @@ export JAX_PLATFORMS=cuda
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
 export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
 uv run --locked --no-sync python -m experiments.bayes_update.run \
-  --pre-norm --query-depth 3 --output-dir "runs/bayes-update-${SLURM_JOB_ID}"
+  --pre-norm --query-depth 3 --output-dir "runs/bayes-update-${SLURM_JOB_ID}" "$@"

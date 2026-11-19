@@ -4,7 +4,13 @@ import jax.numpy as jnp
 import numpy as np
 
 from experiments.bayes_update.run import kernel_draws, sample_episode, stream_chunk
-from navi.bayes_update import BayesReadout, BayesUpdate, prefix_mask, rollout_loss
+from navi.bayes_update import (
+    BayesReadout,
+    BayesUpdate,
+    PairwiseUpdate,
+    prefix_mask,
+    rollout_loss,
+)
 
 
 def _fixture():
@@ -147,3 +153,39 @@ def test_draw_covariance_and_chunk_continuation():
     chunked, final = stream_chunk(update, first, step, episode, 3)
     assert final == total == 5
     np.testing.assert_allclose(full, chunked, atol=2e-6)
+
+
+def test_pairwise_blocks_match_pooled_draws_and_rollout_uses_draw_count():
+    episode, _, settings = _fixture()
+    update = PairwiseUpdate()
+    readout = BayesReadout(exact_kernel=True, use_draw_count=True, **settings)
+    initial = update.initial_state(len(episode.y))
+    state, step = stream_chunk(update, initial, jnp.int32(0), episode, 1, 3)
+    state, step = stream_chunk(update, state, step, episode, 1, 3)
+    draws = kernel_draws(episode.panel, episode.draw_key, jnp.arange(6))
+    gram = draws.T @ draws / 6
+    np.testing.assert_allclose(state, gram, atol=2e-6)
+    assert step == 2
+
+    expected = []
+    for count in (3, 6):
+        prefix = draws[:count]
+        logits = readout(
+            episode.y,
+            episode.u,
+            episode.pairs,
+            gram=prefix.T @ prefix / count,
+            draw_count=count,
+        )
+        expected.append(readout.distribution.loss(logits, episode.targets))
+    loss = eqx.filter_jit(rollout_loss)(
+        update,
+        readout,
+        episode.y,
+        episode.u,
+        episode.pairs,
+        episode.targets,
+        draws.reshape(2, 3, -1),
+        jnp.int32(2),
+    )
+    np.testing.assert_allclose(loss, jnp.mean(jnp.stack(expected)), atol=2e-6)

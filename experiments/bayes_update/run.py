@@ -61,6 +61,14 @@ def kernel_draws(panel, key, indices):
     return jax.vmap(draw)(indices)
 
 
+def _step_draws(panel, key, steps, block_size):
+    if block_size is None:
+        return kernel_draws(panel, key, steps)
+    indices = steps[:, None] * block_size + jnp.arange(block_size, dtype=jnp.uint32)
+    draws = kernel_draws(panel, key, indices.reshape(-1))
+    return draws.reshape(steps.size, block_size, panel.shape[0])
+
+
 def _baseline_scores(exact, phenotype, episode):
     _, y, u, pairs, targets, gram, _ = episode
     return (
@@ -77,8 +85,11 @@ def make_train_step(optimizer, args):
             episode_key, args.context_count, args.features, args.queries
         )
         horizon = jax.random.randint(horizon_key, (), 1, args.t_max + 1)
-        draws = kernel_draws(
-            episode.panel, episode.draw_key, jnp.arange(args.t_max, dtype=jnp.uint32)
+        draws = _step_draws(
+            episode.panel,
+            episode.draw_key,
+            jnp.arange(args.t_max, dtype=jnp.uint32),
+            args.k if args.pairwise_state else None,
         )
 
         def objective(models):
@@ -120,19 +131,30 @@ def make_train_step(optimizer, args):
 
 
 @eqx.filter_jit
-def stream_chunk(update, state, step, episode, length):
+def stream_chunk(update, state, step, episode, length, block_size=None):
     indices = step.astype(jnp.uint32) + jnp.arange(length, dtype=jnp.uint32)
-    draws = kernel_draws(episode.panel, episode.draw_key, indices)
+    draws = _step_draws(episode.panel, episode.draw_key, indices, block_size)
     return advance_chunk(update, state, step, draws, episode.y)
 
 
 @eqx.filter_jit
-def score_prefix(update, readout, state, step, episode, diagnostic_key):
+def score_prefix(
+    update, readout, state, step, episode, diagnostic_key, block_size=None
+):
     nll = readout.distribution.loss(
-        readout.read_state(episode.y, episode.u, episode.pairs, state, step),
+        readout.read_state(
+            episode.y,
+            episode.u,
+            episode.pairs,
+            state,
+            step,
+            draw_count=step * (block_size or 1),
+        ),
         episode.targets,
     )
-    draws = kernel_draws(episode.panel, diagnostic_key, jnp.arange(32))
+    draws = _step_draws(
+        episode.panel, diagnostic_key, jnp.arange(32, dtype=jnp.uint32), block_size
+    )
     drifts = jax.vmap(update.drift, in_axes=(None, 0, None))(state, draws, episode.y)
     return nll, jnp.linalg.norm(state), jnp.linalg.norm(drifts.mean(axis=0))
 
@@ -147,6 +169,7 @@ def evaluate(models, test_key, args):
     sample = jax.jit(sample_episode, static_argnums=(1, 2, 3))
     baseline_scores = eqx.filter_jit(_baseline_scores)
     rows = []
+    block_size = (args.eval_k or args.k) if args.pairwise_state else None
     for index in range(args.test_episodes):
         episode_key, diagnostic_key = jax.random.split(
             jax.random.fold_in(test_key, index)
@@ -161,10 +184,14 @@ def evaluate(models, test_key, args):
         for target in checkpoints(args.t_max, args.eval_multiplier):
             for first in range(previous, target, args.chunk_size):
                 length = min(args.chunk_size, target - first)
-                state, step = stream_chunk(update, state, step, episode, length)
+                state, step = stream_chunk(
+                    update, state, step, episode, length, block_size
+                )
             nll, state_norm, drift_norm = map(
                 float,
-                score_prefix(update, readout, state, step, episode, diagnostic_key),
+                score_prefix(
+                    update, readout, state, step, episode, diagnostic_key, block_size
+                ),
             )
             if not np.isfinite(
                 (nll, exact_nll, phenotype_nll, state_norm, drift_norm)
@@ -176,6 +203,7 @@ def evaluate(models, test_key, args):
                 {
                     "episode": index,
                     "t": target,
+                    "draw_count": target * (block_size or 1),
                     "nll": nll,
                     "kernel_nll": exact_nll,
                     "phenotype_nll": phenotype_nll,
@@ -217,6 +245,7 @@ def write_evaluation(output, rows, t_max, bootstrap_seed, *, pairwise_state=Fals
     summary = [
         dict(
             t=t,
+            draw_count=t * (rows[0]["draw_count"] // rows[0]["t"]),
             **dict(zip(fields, mean.tolist(), strict=True)),
             change_from_t_max_ci95=interval(scores[:, 0] - prefix),
             gap_to_kernel_ci95=interval(scores[:, 0] - scores[:, 1]),
@@ -230,8 +259,13 @@ def write_evaluation(output, rows, t_max, bootstrap_seed, *, pairwise_state=Fals
     ax.plot(grid, means[:, 0], "o-", label=label)
     ax.axhline(means[0, 1], color="C1", label="Exact kernel")
     ax.axhline(means[0, 2], color="C2", label="Phenotype and query features")
-    ax.axvline(t_max, color="0.5", linestyle="--", label="Training horizon")
-    ax.set(xscale="log", xlabel="Draws processed", ylabel="Held-out PFN NLL")
+    ax.axvline(
+        t_max,
+        color="0.5",
+        linestyle="--",
+        label="Training horizon",
+    )
+    ax.set(xscale="log", xlabel="Update steps", ylabel="Held-out PFN NLL")
     ax.legend()
     fig.savefig(output / "prefix_nll.png", dpi=160)
     plt.close(fig)
@@ -254,6 +288,10 @@ def parse_args(argv=None):
         action="store_true",
         help="use the running mean of draw outer products as the context kernel",
     )
+    parser.add_argument(
+        "--k", type=int, default=16, help="draws per pairwise training step"
+    )
+    parser.add_argument("--eval-k", type=int, help="draws per pairwise evaluation step")
     parser.add_argument("--pre-norm", action="store_true")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -275,6 +313,18 @@ def parse_args(argv=None):
         parser.error("--query-depth must be at least 2 for the exact-kernel baseline")
     if args.t_max * args.eval_multiplier >= 2**31:
         parser.error("evaluation horizon must fit in int32")
+    if args.k < 1 or (args.eval_k is not None and args.eval_k < 1):
+        parser.error("draw block sizes must be positive")
+    if (
+        args.pairwise_state
+        and max(
+            args.t_max * args.k,
+            args.t_max * args.eval_multiplier * (args.eval_k or args.k),
+            32 * (args.eval_k or args.k),
+        )
+        >= 2**31
+    ):
+        parser.error("pairwise draw counts must fit in int32")
     if not 0 <= args.seed < 2**32:
         parser.error("--seed must be in [0, 2**32)")
     return args
@@ -295,9 +345,11 @@ def run(args):
     keys = jax.random.split(init, 4)
     if args.pairwise_state:
         update = PairwiseUpdate()
-        readout = BayesReadout(exact_kernel=True, key=keys[1], **settings)
+        readout = BayesReadout(
+            exact_kernel=True, use_draw_count=True, key=keys[1], **settings
+        )
         state_metadata = {
-            "schedule": {"type": "running_mean", "proposal": "draw_outer_product"}
+            "schedule": {"type": "running_mean", "proposal": "block_second_moment"}
         }
     else:
         update = BayesUpdate(16, 32, 4, pre_norm=args.pre_norm, key=keys[0])
