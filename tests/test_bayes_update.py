@@ -57,12 +57,32 @@ def test_recurrent_readout_matches_exact_readout_on_state_gram():
     recurrent = BayesReadout(state_width=3, **settings)
     exact = BayesReadout(exact_kernel=True, **settings)
     state = jnp.arange(len(y) * 3, dtype=jnp.float32).reshape(len(y), 3) / 8
-    gram = state @ state.T
+    gram = (state @ state.T) / state.shape[1]
     np.testing.assert_allclose(
         recurrent(y, u, pairs, state=state, step=4),
         exact(y, u, pairs, gram=gram),
         atol=2e-6,
     )
+
+
+def test_update_is_running_mean_of_bounded_proposals():
+    episode, update, _ = _fixture()
+    y = episode.y
+    draws = kernel_draws(episode.panel, episode.draw_key, jnp.arange(5))
+    state = update.initial_state(len(y))
+    proposals = []
+    for step, draw in enumerate(draws, 1):
+        inputs = jnp.concatenate((state, draw[:, None], y), axis=1)
+        hidden = update.mixer(jax.vmap(update.input_projection)(inputs))
+        proposal = jnp.tanh(jax.vmap(update.output_projection)(hidden))
+        proposals.append(proposal)
+        new_state, drift = update.step(state, draw, y, step)
+        np.testing.assert_allclose(drift, proposal - state, atol=1e-6)
+        np.testing.assert_allclose(
+            new_state, jnp.mean(jnp.stack(proposals), axis=0), atol=1e-6
+        )
+        assert jnp.all(jnp.abs(new_state) <= 1)
+        state = new_state
 
 
 def test_scored_rollout_matches_manual_stepping_and_batches():

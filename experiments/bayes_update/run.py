@@ -297,7 +297,7 @@ def run(args):
         "state_width": 16,
         "device": str(jax.devices()[0]),
         "learning_rate": 1e-3,
-        "schedule": {"eta": update.eta, "offset": update.offset, "alpha": update.alpha},
+        "schedule": {"type": "running_mean", "proposal_activation": "tanh"},
     }
     (args.output_dir / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
     with (args.output_dir / "training.csv").open("w", newline="") as file:

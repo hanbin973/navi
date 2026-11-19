@@ -1,6 +1,5 @@
-"""State-conditioned Navi readout and damped Bayesian update."""
+"""State-conditioned Navi readout and bounded Bayesian update."""
 
-import math
 from typing import final
 
 import equinox as eqx
@@ -80,7 +79,7 @@ class BayesReadout(eqx.Module):
         if self.gram_bias is not None:
             if self.state_width:
                 state = _features(state, (n, self.state_width), "state")
-                gram = state @ state.T
+                gram = (state @ state.T) / self.state_width
             else:
                 gram = _features(gram, (n, n), "context kernel")
             y = jnp.concatenate((y, jnp.diag(gram)[:, None]), axis=1)
@@ -103,35 +102,13 @@ class BayesReadout(eqx.Module):
 
 @final
 class BayesUpdate(eqx.Module):
-    """Equivariant recurrent drift with a global diminishing step size."""
+    """Equivariant running mean of bounded recurrent proposals."""
 
     input_projection: eqx.nn.Linear
     mixer: _Block
     output_projection: eqx.nn.Linear
-    eta: float = eqx.field(static=True)
-    offset: float = eqx.field(static=True)
-    alpha: float = eqx.field(static=True)
 
-    def __init__(
-        self,
-        state_width,
-        width,
-        heads,
-        *,
-        pre_norm,
-        key,
-        eta=1.0,
-        offset=0.0,
-        alpha=0.75,
-    ):
-        if not (
-            math.isfinite(eta)
-            and eta > 0
-            and math.isfinite(offset)
-            and offset >= 0
-            and 0.5 < alpha <= 1
-        ):
-            raise ValueError("invalid diminishing step schedule")
+    def __init__(self, state_width, width, heads, *, pre_norm, key):
         if min(state_width, width, heads) < 1 or width % heads:
             raise ValueError("invalid update dimensions")
         first, middle, last = jax.random.split(key, 3)
@@ -144,23 +121,20 @@ class BayesUpdate(eqx.Module):
         self.output_projection = eqx.nn.Linear(
             width, state_width, key=last, dtype=jnp.float32
         )
-        self.eta = eta
-        self.offset = offset
-        self.alpha = alpha
 
     def initial_state(self, n):
         return jnp.zeros((n, self.output_projection.out_features), dtype=jnp.float32)
 
     def drift(self, state, draw, y):
         inputs = jnp.concatenate((state, draw[:, None], y), axis=1)
-        return jax.vmap(self.output_projection)(
+        proposal = jax.vmap(self.output_projection)(
             self.mixer(jax.vmap(self.input_projection)(inputs))
         )
+        return jnp.tanh(proposal) - state
 
     def step(self, state, draw, y, step):
-        gamma = self.eta * (jnp.float32(step) + self.offset) ** -self.alpha
         drift = self.drift(state, draw, y)
-        return state + gamma * drift, drift
+        return state + drift / jnp.float32(step), drift
 
 
 def prefix_mask(steps, horizon):
