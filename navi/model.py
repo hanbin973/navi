@@ -128,6 +128,37 @@ def _features(values, shape, name):
 Context = tuple[Array, ...]
 
 
+def _encode_tokens(tokens, blocks, *, bias=None):
+    states = [tokens]
+    for block in blocks:
+        tokens = block(tokens, bias=bias)
+        states.append(tokens)
+    return tuple(states)
+
+
+def _decode_tokens(model, context, u, pair_features):
+    def read(query_features, pairs):
+        query = model.query_projection(query_features)[None]
+        for state, encoder, kernel_bias, block in zip(
+            context,
+            model.pair_encoders,
+            model.kernel_biases,
+            model.query_blocks,
+            strict=True,
+        ):
+            memory = jax.vmap(encoder)(jnp.concatenate((state, pairs), axis=-1))
+            bias = jax.vmap(kernel_bias)(pairs)
+            query = block(
+                query,
+                memory,
+                bias=bias.T[None, :, None, :],
+                read_scale=math.sqrt(memory.shape[0]),
+            )
+        return _features(model.head(query[0]), (model.out_size,), "head output")
+
+    return jax.vmap(read)(u, pair_features)
+
+
 @final
 class Navi(eqx.Module):
     """FP32 episode model with reusable layerwise context states.
@@ -307,34 +338,11 @@ class Navi(eqx.Module):
     @eqx.filter_jit
     def _encode(self, x, ids):
         tokens = jax.vmap(self.context_projection)(x) + self.id_embedding.weight[ids]
-        states = [tokens]
-        for block in self.context_blocks:
-            tokens = block(tokens)
-            states.append(tokens)
-        return tuple(states)
+        return _encode_tokens(tokens, self.context_blocks)
 
     @eqx.filter_jit
     def _decode(self, context, u, pair_features):
-        def read(query_features, pairs):
-            query = self.query_projection(query_features)[None]
-            for state, encoder, kernel_bias, block in zip(
-                context,
-                self.pair_encoders,
-                self.kernel_biases,
-                self.query_blocks,
-                strict=True,
-            ):
-                memory = jax.vmap(encoder)(jnp.concatenate((state, pairs), axis=-1))
-                bias = jax.vmap(kernel_bias)(pairs)
-                query = block(
-                    query,
-                    memory,
-                    bias=bias.T[None, :, None, :],
-                    read_scale=math.sqrt(memory.shape[0]),
-                )
-            return _features(self.head(query[0]), (self.out_size,), "head output")
-
-        return jax.vmap(read)(u, pair_features)
+        return _decode_tokens(self, context, u, pair_features)
 
     def encode_context(self, x: Array, ids: Array) -> Context:
         r"""Encode context observations and IDs into an immutable tuple.

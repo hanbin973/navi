@@ -1,0 +1,211 @@
+"""State-conditioned Navi readout and damped Bayesian update."""
+
+import math
+from typing import final
+
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+from jax import Array
+
+from .distribution import FullSupportBarDistribution
+from .model import _MLP, Navi, _Block, _decode_tokens, _encode_tokens, _features
+
+
+@final
+class BayesReadout(eqx.Module):
+    """Navi density readout with recurrent, exact-kernel or phenotype inputs."""
+
+    context_projection: eqx.nn.Linear
+    state_projection: eqx.nn.Linear | None
+    context_blocks: tuple[_Block, ...]
+    query_projection: eqx.nn.Linear
+    query_blocks: tuple[_Block, ...]
+    pair_encoders: tuple[_MLP, ...]
+    kernel_biases: tuple[eqx.nn.Linear, ...]
+    head: eqx.nn.MLP
+    distribution: FullSupportBarDistribution
+    gram_bias: eqx.nn.Linear | None
+    out_size: int = eqx.field(static=True)
+
+    def __init__(self, *, state_width=0, exact_kernel=False, key, **settings):
+        if exact_kernel and settings["query_depth"] < 2:
+            raise ValueError(
+                "exact-kernel conditioning requires query depth of at least 2"
+            )
+        if state_width < 0 or (state_width and exact_kernel):
+            raise ValueError("state and exact-kernel conditioning are separate modes")
+        base_key, state_key, gram_key = jax.random.split(key, 3)
+        base = Navi(
+            context_size=2 if exact_kernel else 1,
+            query_size=1,
+            pair_size=1,
+            num_ids=1,
+            key=base_key,
+            **settings,
+        )
+        self.context_projection = base.context_projection
+        self.context_blocks = base.context_blocks
+        self.query_projection = base.query_projection
+        self.query_blocks = base.query_blocks
+        self.pair_encoders = base.pair_encoders
+        self.kernel_biases = base.kernel_biases
+        self.head = base.head
+        self.distribution = base.distribution
+        self.out_size = base.out_size
+        width = base.context_projection.out_features
+        self.state_projection = (
+            eqx.nn.Linear(
+                state_width + 1, width, use_bias=False, key=state_key, dtype=jnp.float32
+            )
+            if state_width
+            else None
+        )
+        self.gram_bias = (
+            eqx.nn.Linear(
+                1,
+                settings["num_heads"],
+                use_bias=False,
+                key=gram_key,
+                dtype=jnp.float32,
+            )
+            if exact_kernel
+            else None
+        )
+
+    def encode_context(self, y, *, state=None, step=None, gram=None):
+        """Encode the context at one prefix for reuse across query batches."""
+        if y.ndim != 2 or not y.shape[0]:
+            raise ValueError("y must contain a nonempty column of context phenotypes")
+        n = y.shape[0]
+        y = _features(y, (n, 1), "y")
+        bias = None
+        if self.gram_bias is not None:
+            gram = _features(gram, (n, n), "context kernel")
+            y = jnp.concatenate((y, jnp.diag(gram)[:, None]), axis=1)
+            bias = jax.vmap(jax.vmap(self.gram_bias))(gram[..., None])
+            bias = bias.transpose(2, 0, 1)[None]
+        tokens = jax.vmap(self.context_projection)(y)
+        if self.state_projection is not None:
+            state = _features(
+                state, (n, self.state_projection.in_features - 1), "state"
+            )
+            count = jnp.broadcast_to(1 / (1 + jnp.float32(step)), (n, 1))
+            tokens += jax.vmap(self.state_projection)(
+                jnp.concatenate((state, count), axis=1)
+            )
+        return _encode_tokens(tokens, self.context_blocks, bias=bias)
+
+    def decode_queries(self, context, u, pair_features):
+        """Score independent query marginals from a context encoding."""
+        u = _features(u, (u.shape[0], 1), "query features")
+        n = context[0].shape[0]
+        pair_features = _features(pair_features, (u.shape[0], n, 1), "pair features")
+        return _decode_tokens(self, context, u, pair_features)
+
+    def __call__(self, y, u, pair_features, *, state=None, step=None, gram=None):
+        context = self.encode_context(y, state=state, step=step, gram=gram)
+        return self.decode_queries(context, u, pair_features)
+
+
+@final
+class BayesUpdate(eqx.Module):
+    """Equivariant recurrent drift with a global diminishing step size."""
+
+    input_projection: eqx.nn.Linear
+    mixer: _Block
+    output_projection: eqx.nn.Linear
+    eta: float = eqx.field(static=True)
+    offset: float = eqx.field(static=True)
+    alpha: float = eqx.field(static=True)
+
+    def __init__(
+        self,
+        state_width,
+        width,
+        heads,
+        *,
+        pre_norm,
+        key,
+        eta=1.0,
+        offset=0.0,
+        alpha=0.75,
+    ):
+        if not (
+            math.isfinite(eta)
+            and eta > 0
+            and math.isfinite(offset)
+            and offset >= 0
+            and 0.5 < alpha <= 1
+        ):
+            raise ValueError("invalid diminishing step schedule")
+        if min(state_width, width, heads) < 1 or width % heads:
+            raise ValueError("invalid update dimensions")
+        first, middle, last = jax.random.split(key, 3)
+        self.input_projection = eqx.nn.Linear(
+            state_width + 2, width, key=first, dtype=jnp.float32
+        )
+        self.mixer = _Block(
+            width, heads, 2 * width, zero_init=False, pre_norm=pre_norm, key=middle
+        )
+        self.output_projection = eqx.nn.Linear(
+            width, state_width, key=last, dtype=jnp.float32
+        )
+        self.eta = eta
+        self.offset = offset
+        self.alpha = alpha
+
+    def initial_state(self, n):
+        return jnp.zeros((n, self.output_projection.out_features), dtype=jnp.float32)
+
+    def drift(self, state, draw, y):
+        inputs = jnp.concatenate((state, draw[:, None], y), axis=1)
+        return jax.vmap(self.output_projection)(
+            self.mixer(jax.vmap(self.input_projection)(inputs))
+        )
+
+    def step(self, state, draw, y, step):
+        gamma = self.eta * (jnp.float32(step) + self.offset) ** -self.alpha
+        drift = self.drift(state, draw, y)
+        return state + gamma * drift, drift
+
+
+def prefix_mask(steps, horizon):
+    """Select the powers of two and the terminal prefix."""
+    return (steps <= horizon) & (((steps & (steps - 1)) == 0) | (steps == horizon))
+
+
+def rollout_loss(update, readout, y, u, pairs, targets, draws, horizon):
+    """Average marginal PFN log loss over the selected rollout steps."""
+    steps = jnp.arange(1, draws.shape[0] + 1, dtype=jnp.int32)
+    selected = prefix_mask(steps, horizon)
+
+    def advance(state, inputs):
+        draw, step, score = inputs
+        state = jax.lax.cond(
+            step <= horizon, lambda: update.step(state, draw, y, step)[0], lambda: state
+        )
+        nll = jax.lax.cond(
+            score,
+            lambda: readout.distribution.loss(
+                readout(y, u, pairs, state=state, step=step), targets
+            ),
+            lambda: jnp.float32(0),
+        )
+        return state, nll
+
+    _, scores = jax.lax.scan(
+        advance, update.initial_state(y.shape[0]), (draws, steps, selected)
+    )
+    return jnp.sum(scores) / jnp.sum(selected)
+
+
+def advance_chunk(update, state: Array, step, draws: Array, y: Array):
+    """Consume a chunk and return state and the last absolute step."""
+
+    def advance(carry, draw):
+        current, index = carry
+        current, _ = update.step(current, draw, y, index + 1)
+        return (current, index + 1), None
+
+    return jax.lax.scan(advance, (state, step), draws)[0]
