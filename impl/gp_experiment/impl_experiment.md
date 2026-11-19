@@ -224,6 +224,23 @@ Across 100 held-out episodes, Navi achieved negative log-density
 The paired MSE gap was 0.1759 with a 95% bootstrap interval of
 [0.1416, 0.2127].
 
+### GPU depth sweep
+
+Slurm jobs `66394922` and `66394923` ran depths four and six from
+commit `3e24562` on `pfn_style`. Both completed 5,000 steps with exit
+code `0:0`. All three depths used seed 1, one GPU, two CPUs, 16 GiB of
+host memory, a 15-minute time limit, and the same 100 held-out episodes.
+
+| Query depth | Runtime | Selected step | Validation NLL | Held-out NLL | Latent MSE | Mean within-episode Pearson $r$ |
+| --- | --- | --- | --- | --- | --- | --- |
+| 3 | 3:50 | 5,000 | 1.4226 | 1.3540 | 0.9609 | 0.4982 |
+| 4 | 4:34 | 3,500 | 1.4224 | 1.3614 | 1.0175 | 0.4955 |
+| 6 | 6:00 | 3,500 | 1.5933 | 1.5100 | 1.2948 | 0.1660 |
+
+Depths three and four had similar validation NLL. Depth three led all
+three held-out metrics in this seed-1 sweep. Oracle BLUP had latent
+MSE 0.7850 and mean within-episode Pearson correlation 0.5527.
+
 ## Prior results
 
 The previous decoder showed weak learning in the Gaussian experiment.

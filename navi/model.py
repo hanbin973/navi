@@ -84,7 +84,10 @@ class _Block(eqx.Module):
     attention_norm: eqx.nn.LayerNorm
     mlp_norm: eqx.nn.LayerNorm
 
-    def __init__(self, width, heads, hidden_size, *, zero_init, key):
+    pre_norm: bool = eqx.field(static=True)
+
+    def __init__(self, width, heads, hidden_size, *, zero_init, key, pre_norm=False):
+        self.pre_norm = pre_norm
         attn, mlp = jax.random.split(key)
         self.attention = _Attention(width, heads, zero_init=zero_init, key=attn)
         self.mlp = _MLP(
@@ -98,6 +101,15 @@ class _Block(eqx.Module):
         )
 
     def __call__(self, tokens, source=None, *, bias=None, read_scale=1.0):
+        if self.pre_norm:
+            normalized = jax.vmap(self.attention_norm)(tokens)
+            memory = (
+                normalized if source is None else jax.vmap(self.attention_norm)(source)
+            )
+            read = self.attention(normalized[None], memory[None], bias=bias)[0]
+            tokens = tokens + read_scale * read
+            return tokens + jax.vmap(self.mlp)(jax.vmap(self.mlp_norm)(tokens))
+
         source = tokens if source is None else source
         read = self.attention(tokens[None], source[None], bias=bias)[0]
         tokens = tokens + read_scale * read
@@ -124,7 +136,8 @@ class Navi(eqx.Module):
     the same shape. For training, differentiate a loss that calls the model
     so gradients reach the context projection, ID embeddings and blocks.
     Each query layer uses pair features in both its key/value memory and
-    its per-head attention logit bias.
+    its per-head attention logit bias. Set `pre_norm=True` to normalize
+    inputs to attention and the MLP in both stacks. The default is post-norm.
     """
 
     context_projection: eqx.nn.Linear
@@ -152,11 +165,14 @@ class Navi(eqx.Module):
         key: Array,
         hidden_size: int | None = None,
         zero_init: bool = True,
+        pre_norm: bool = False,
         kernel_bias_init_scale: float = 1.0,
         bin_edges: Array | tuple[float, ...] | list[float] | None = None,
         head: Callable[[Array], Array] | None = None,
         out_size: int | None = None,
     ):
+        if not isinstance(pre_norm, bool):
+            raise TypeError("pre_norm must be a bool")
         dimensions = {
             "context_size": context_size,
             "query_size": query_size,
@@ -200,11 +216,25 @@ class Navi(eqx.Module):
             num_ids, width, dtype=jnp.float32, key=next(keys)
         )
         self.context_blocks = tuple(
-            _Block(width, num_heads, hidden_size, zero_init=zero_init, key=next(keys))
+            _Block(
+                width,
+                num_heads,
+                hidden_size,
+                zero_init=zero_init,
+                key=next(keys),
+                pre_norm=pre_norm,
+            )
             for _ in range(query_depth - 1)
         )
         self.query_blocks = tuple(
-            _Block(width, num_heads, hidden_size, zero_init=zero_init, key=next(keys))
+            _Block(
+                width,
+                num_heads,
+                hidden_size,
+                zero_init=zero_init,
+                key=next(keys),
+                pre_norm=pre_norm,
+            )
             for _ in range(query_depth)
         )
         self.pair_encoders = tuple(

@@ -175,6 +175,29 @@ def manual_read(model, context, query, pairs):
     return model.head(token[0])
 
 
+def test_pre_norm_zero_initialized_blocks_preserve_residuals(episode):
+    model = make_model(
+        pre_norm=True,
+        zero_init=True,
+        bin_edges=None,
+        head=lambda token: token,
+        out_size=4,
+    )
+    x, ids, u, pairs = episode
+    expected_context = (
+        jax.vmap(model.context_projection)(x) + model.id_embedding.weight[ids]
+    )
+    for state in model.encode_context(x, ids):
+        close(state, expected_context)
+
+    predictions, tangent = jax.jvp(
+        lambda queries: model(x, ids, queries, pairs), (u,), (jnp.ones_like(u),)
+    )
+    close(predictions, jax.vmap(model.query_projection)(u))
+    expected_tangent = model.query_projection.weight.sum(axis=1)
+    close(tangent, jnp.broadcast_to(expected_tangent, predictions.shape))
+
+
 def test_layer_schedule(episode):
     model = make_model()
     x, ids, u, pairs = episode
