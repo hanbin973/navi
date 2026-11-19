@@ -17,7 +17,7 @@ class BayesReadout(eqx.Module):
     """Navi density readout with recurrent, exact-kernel or phenotype inputs."""
 
     context_projection: eqx.nn.Linear
-    state_projection: eqx.nn.Linear | None
+    state_width: int = eqx.field(static=True)
     context_blocks: tuple[_Block, ...]
     query_projection: eqx.nn.Linear
     query_blocks: tuple[_Block, ...]
@@ -35,9 +35,9 @@ class BayesReadout(eqx.Module):
             )
         if state_width < 0 or (state_width and exact_kernel):
             raise ValueError("state and exact-kernel conditioning are separate modes")
-        base_key, state_key, gram_key = jax.random.split(key, 3)
+        base_key, _, gram_key = jax.random.split(key, 3)
         base = Navi(
-            context_size=2 if exact_kernel else 1,
+            context_size=2 if exact_kernel or state_width else 1,
             query_size=1,
             pair_size=1,
             num_ids=1,
@@ -53,14 +53,7 @@ class BayesReadout(eqx.Module):
         self.head = base.head
         self.distribution = base.distribution
         self.out_size = base.out_size
-        width = base.context_projection.out_features
-        self.state_projection = (
-            eqx.nn.Linear(
-                state_width + 1, width, use_bias=False, key=state_key, dtype=jnp.float32
-            )
-            if state_width
-            else None
-        )
+        self.state_width = state_width
         self.gram_bias = (
             eqx.nn.Linear(
                 1,
@@ -69,31 +62,31 @@ class BayesReadout(eqx.Module):
                 key=gram_key,
                 dtype=jnp.float32,
             )
-            if exact_kernel
+            if exact_kernel or state_width
             else None
         )
 
     def encode_context(self, y, *, state=None, step=None, gram=None):
-        """Encode the context at one prefix for reuse across query batches."""
+        """Encode the context for reuse across query batches.
+
+        The recurrent state supplies a Gram matrix. The step argument is
+        accepted for compatibility with existing rollout callers.
+        """
         if y.ndim != 2 or not y.shape[0]:
             raise ValueError("y must contain a nonempty column of context phenotypes")
         n = y.shape[0]
         y = _features(y, (n, 1), "y")
         bias = None
         if self.gram_bias is not None:
-            gram = _features(gram, (n, n), "context kernel")
+            if self.state_width:
+                state = _features(state, (n, self.state_width), "state")
+                gram = state @ state.T
+            else:
+                gram = _features(gram, (n, n), "context kernel")
             y = jnp.concatenate((y, jnp.diag(gram)[:, None]), axis=1)
             bias = jax.vmap(jax.vmap(self.gram_bias))(gram[..., None])
             bias = bias.transpose(2, 0, 1)[None]
         tokens = jax.vmap(self.context_projection)(y)
-        if self.state_projection is not None:
-            state = _features(
-                state, (n, self.state_projection.in_features - 1), "state"
-            )
-            count = jnp.broadcast_to(1 / (1 + jnp.float32(step)), (n, 1))
-            tokens += jax.vmap(self.state_projection)(
-                jnp.concatenate((state, count), axis=1)
-            )
         return _encode_tokens(tokens, self.context_blocks, bias=bias)
 
     def decode_queries(self, context, u, pair_features):

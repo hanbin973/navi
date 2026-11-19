@@ -51,6 +51,20 @@ def test_update_and_readouts_have_context_permutation_symmetry():
     )
 
 
+def test_recurrent_readout_matches_exact_readout_on_state_gram():
+    episode, _, settings = _fixture()
+    _, y, u, pairs, _, _, _ = episode
+    recurrent = BayesReadout(state_width=3, **settings)
+    exact = BayesReadout(exact_kernel=True, **settings)
+    state = jnp.arange(len(y) * 3, dtype=jnp.float32).reshape(len(y), 3) / 8
+    gram = state @ state.T
+    np.testing.assert_allclose(
+        recurrent(y, u, pairs, state=state, step=4),
+        exact(y, u, pairs, gram=gram),
+        atol=2e-6,
+    )
+
+
 def test_scored_rollout_matches_manual_stepping_and_batches():
     episode, update, settings = _fixture()
     _, y, u, pairs, targets, _, _ = episode
