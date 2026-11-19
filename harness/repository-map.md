@@ -26,7 +26,7 @@ changing them.
 
 ## Application code and tests
 
-- `navi/bayes_update.py` — recurrent kernel-draw update and Navi density readouts.
+- `navi/bayes_update.py` — learned recurrent and pairwise second-moment updates with Navi density readouts.
 - `navi/model.py` — Equinox episode model and dense PFNs block primitives.
 - `navi/helper.py` — abstract query kernel and dataset simulator interfaces,
   Gaussian reference helpers, and training episode assembly.

@@ -99,6 +99,12 @@ class BayesReadout(eqx.Module):
         context = self.encode_context(y, state=state, step=step, gram=gram)
         return self.decode_queries(context, u, pair_features)
 
+    def read_state(self, y, u, pair_features, state, step):
+        """Read a recurrent feature matrix or a pairwise second moment."""
+        if self.state_width:
+            return self(y, u, pair_features, state=state, step=step)
+        return self(y, u, pair_features, gram=state)
+
 
 @final
 class BayesUpdate(eqx.Module):
@@ -137,6 +143,21 @@ class BayesUpdate(eqx.Module):
         return state + drift / jnp.float32(step), drift
 
 
+@final
+class PairwiseUpdate(eqx.Module):
+    """Running uncentered second moment of zero-mean Gaussian draws."""
+
+    def initial_state(self, n):
+        return jnp.zeros((n, n), dtype=jnp.float32)
+
+    def drift(self, state, draw, y):
+        return jnp.outer(draw, draw) - state
+
+    def step(self, state, draw, y, step):
+        drift = self.drift(state, draw, y)
+        return state + drift / jnp.float32(step), drift
+
+
 def prefix_mask(steps, horizon):
     """Select the powers of two and the terminal prefix."""
     return (steps <= horizon) & (((steps & (steps - 1)) == 0) | (steps == horizon))
@@ -155,7 +176,7 @@ def rollout_loss(update, readout, y, u, pairs, targets, draws, horizon):
         nll = jax.lax.cond(
             score,
             lambda: readout.distribution.loss(
-                readout(y, u, pairs, state=state, step=step), targets
+                readout.read_state(y, u, pairs, state, step), targets
             ),
             lambda: jnp.float32(0),
         )

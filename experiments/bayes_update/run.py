@@ -14,7 +14,13 @@ import optax
 
 from experiments.gp_experiment.data import draw_episode, query_features
 from experiments.gp_experiment.run import prior_bin_edges
-from navi.bayes_update import BayesReadout, BayesUpdate, advance_chunk, rollout_loss
+from navi.bayes_update import (
+    BayesReadout,
+    BayesUpdate,
+    PairwiseUpdate,
+    advance_chunk,
+    rollout_loss,
+)
 
 
 class Episode(NamedTuple):
@@ -123,7 +129,7 @@ def stream_chunk(update, state, step, episode, length):
 @eqx.filter_jit
 def score_prefix(update, readout, state, step, episode, diagnostic_key):
     nll = readout.distribution.loss(
-        readout(episode.y, episode.u, episode.pairs, state=state, step=step),
+        readout.read_state(episode.y, episode.u, episode.pairs, state, step),
         episode.targets,
     )
     draws = kernel_draws(episode.panel, diagnostic_key, jnp.arange(32))
@@ -181,7 +187,7 @@ def evaluate(models, test_key, args):
     return rows
 
 
-def write_evaluation(output, rows, t_max, bootstrap_seed):
+def write_evaluation(output, rows, t_max, bootstrap_seed, *, pairwise_state=False):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -220,7 +226,8 @@ def write_evaluation(output, rows, t_max, bootstrap_seed):
     ]
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     fig, ax = plt.subplots(layout="constrained")
-    ax.plot(grid, means[:, 0], "o-", label="Recurrent Navi")
+    label = "Sample second moment" if pairwise_state else "Recurrent Navi"
+    ax.plot(grid, means[:, 0], "o-", label=label)
     ax.axhline(means[0, 1], color="C1", label="Exact kernel")
     ax.axhline(means[0, 2], color="C2", label="Phenotype and query features")
     ax.axvline(t_max, color="0.5", linestyle="--", label="Training horizon")
@@ -242,6 +249,11 @@ def parse_args(argv=None):
     parser.add_argument("--eval-multiplier", type=int, default=16)
     parser.add_argument("--chunk-size", type=int, default=32)
     parser.add_argument("--query-depth", type=int, default=3)
+    parser.add_argument(
+        "--pairwise-state",
+        action="store_true",
+        help="use the running mean of draw outer products as the context kernel",
+    )
     parser.add_argument("--pre-norm", action="store_true")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -281,10 +293,22 @@ def run(args):
         "bin_edges": edges,
     }
     keys = jax.random.split(init, 4)
-    update = BayesUpdate(16, 32, 4, pre_norm=args.pre_norm, key=keys[0])
+    if args.pairwise_state:
+        update = PairwiseUpdate()
+        readout = BayesReadout(exact_kernel=True, key=keys[1], **settings)
+        state_metadata = {
+            "schedule": {"type": "running_mean", "proposal": "draw_outer_product"}
+        }
+    else:
+        update = BayesUpdate(16, 32, 4, pre_norm=args.pre_norm, key=keys[0])
+        readout = BayesReadout(state_width=16, key=keys[1], **settings)
+        state_metadata = {
+            "state_width": 16,
+            "schedule": {"type": "running_mean", "proposal_activation": "tanh"},
+        }
     models = (
         update,
-        BayesReadout(state_width=16, key=keys[1], **settings),
+        readout,
         BayesReadout(exact_kernel=True, key=keys[2], **settings),
         BayesReadout(key=keys[3], **settings),
     )
@@ -294,10 +318,9 @@ def run(args):
     metadata = vars(args) | {
         "output_dir": str(args.output_dir),
         "model": settings,
-        "state_width": 16,
         "device": str(jax.devices()[0]),
         "learning_rate": 1e-3,
-        "schedule": {"type": "running_mean", "proposal_activation": "tanh"},
+        **state_metadata,
     }
     (args.output_dir / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
     with (args.output_dir / "training.csv").open("w", newline="") as file:
@@ -316,7 +339,11 @@ def run(args):
     eqx.tree_serialise_leaves(args.output_dir / "models.eqx", models)
     rows = evaluate(models, test, args)
     write_evaluation(
-        args.output_dir, rows, args.t_max, np.asarray(jax.random.key_data(bootstrap))
+        args.output_dir,
+        rows,
+        args.t_max,
+        np.asarray(jax.random.key_data(bootstrap)),
+        pairwise_state=args.pairwise_state,
     )
 
 
