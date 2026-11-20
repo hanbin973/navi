@@ -77,22 +77,22 @@ def _baseline_scores(exact, phenotype, episode):
     )
 
 
-def make_train_step(optimizer, args):
-    @eqx.filter_jit
+def make_train_chunk(optimizer, args):
     def train_step(models, opt_state, key):
         episode_key, horizon_key = jax.random.split(key)
-        episode = sample_episode(
-            episode_key, args.context_count, args.features, args.queries
-        )
-        horizon = jax.random.randint(horizon_key, (), 1, args.t_max + 1)
-        draws = _step_draws(
-            episode.panel,
-            episode.draw_key,
-            jnp.arange(args.t_max, dtype=jnp.uint32),
-            args.k if args.pairwise_state else None,
-        )
+        horizon = jax.random.randint(horizon_key, (), 2, args.t_max + 1)
 
-        def objective(models):
+        def episode_losses(models, key):
+            episode = sample_episode(
+                key, args.context_count, args.features, args.queries
+            )
+            draws = _step_draws(
+                episode.panel,
+                episode.draw_key,
+                jnp.arange(args.t_max, dtype=jnp.uint32),
+                args.k if args.pairwise_state else None,
+            )
+
             update, readout, exact, phenotype = models
             values = jnp.stack(
                 (
@@ -105,11 +105,20 @@ def make_train_step(optimizer, args):
                         episode.targets,
                         draws,
                         horizon,
+                        min_prefix=2,
                     ),
                     *_baseline_scores(exact, phenotype, episode),
                 )
             )
-            return jnp.sum(values), values
+            return values
+
+        keys = jax.random.split(episode_key, args.batch_size)
+
+        def objective(models):
+            # Share the horizon so rollout conditionals remain scalar under vmap.
+            values = jax.vmap(episode_losses, in_axes=(None, 0))(models, keys)
+            means = values.mean(axis=0)
+            return means.sum(), means
 
         (_, values), gradients = eqx.filter_value_and_grad(objective, has_aux=True)(
             models
@@ -127,7 +136,34 @@ def make_train_step(optimizer, args):
         )
         return models, opt_state, values, finite
 
-    return train_step
+    @eqx.filter_jit
+    def train_chunk(models, opt_state, key, first_step, length):
+        params, static = eqx.partition(models, eqx.is_inexact_array)
+
+        def update(carry, step):
+            params, state, healthy = carry
+
+            def apply_update():
+                models, new_state, values, finite = train_step(
+                    eqx.combine(params, static), state, jax.random.fold_in(key, step)
+                )
+                return (eqx.filter(models, eqx.is_inexact_array), new_state, finite), (
+                    values,
+                    finite,
+                )
+
+            def skip_update():
+                return carry, (jnp.full((3,), jnp.nan, dtype=jnp.float32), healthy)
+
+            return jax.lax.cond(healthy, apply_update, skip_update)
+
+        steps = first_step + jnp.arange(length, dtype=jnp.uint32)
+        (params, opt_state, _), metrics = jax.lax.scan(
+            update, (params, opt_state, jnp.bool_(True)), steps
+        )
+        return eqx.combine(params, static), opt_state, metrics
+
+    return train_chunk
 
 
 @eqx.filter_jit
@@ -278,6 +314,7 @@ def parse_args(argv=None):
     parser.add_argument("--features", type=int, default=16)
     parser.add_argument("--queries", type=int, default=8)
     parser.add_argument("--steps", type=int, default=5000)
+    parser.add_argument("--batch-size", type=int, default=1, help="episodes per update")
     parser.add_argument("--test-episodes", type=int, default=128)
     parser.add_argument("--t-max", type=int, default=32)
     parser.add_argument("--eval-multiplier", type=int, default=16)
@@ -300,6 +337,7 @@ def parse_args(argv=None):
         args.features,
         args.queries,
         args.steps,
+        args.batch_size,
         args.test_episodes,
         args.t_max,
         args.chunk_size,
@@ -311,6 +349,8 @@ def parse_args(argv=None):
         )
     if args.query_depth < 2:
         parser.error("--query-depth must be at least 2 for the exact-kernel baseline")
+    if args.t_max < 2:
+        parser.error("--t-max must be at least 2 for training")
     if args.t_max * args.eval_multiplier >= 2**31:
         parser.error("evaluation horizon must fit in int32")
     if args.k < 1 or (args.eval_k is not None and args.eval_k < 1):
@@ -366,7 +406,7 @@ def run(args):
     )
     optimizer = optax.adam(1e-3)
     opt_state = optimizer.init(eqx.filter(models, eqx.is_inexact_array))
-    train_step = make_train_step(optimizer, args)
+    train_chunk = make_train_chunk(optimizer, args)
     metadata = vars(args) | {
         "output_dir": str(args.output_dir),
         "model": settings,
@@ -378,16 +418,25 @@ def run(args):
     with (args.output_dir / "training.csv").open("w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(("step", "nll", "kernel_nll", "phenotype_nll"))
-        for step in range(1, args.steps + 1):
-            models, opt_state, values, finite = train_step(
-                models, opt_state, jax.random.fold_in(train, step)
+        report_every = 100
+        for first_step in range(1, args.steps + 1, report_every):
+            length = min(report_every, args.steps - first_step + 1)
+            models, opt_state, metrics = train_chunk(
+                models, opt_state, train, jnp.uint32(first_step), length
             )
-            if not bool(finite):
-                raise ValueError(f"nonfinite training values at step {step}")
-            writer.writerow((step, *np.asarray(values).tolist()))
-            if step == 1 or step % 100 == 0 or step == args.steps:
-                file.flush()
-                print(f"Training step {step}/{args.steps}", flush=True)
+            values, finite = jax.device_get(metrics)
+            valid_count = len(finite) if finite.all() else int(np.argmin(finite))
+            writer.writerows(
+                (step, *row)
+                for step, row in enumerate(values[:valid_count], start=first_step)
+            )
+            if valid_count != length:
+                raise ValueError(
+                    f"nonfinite training values at step {first_step + valid_count}"
+                )
+            file.flush()
+            step = first_step + length - 1
+            print(f"Training step {step}/{args.steps}", flush=True)
     eqx.tree_serialise_leaves(args.output_dir / "models.eqx", models)
     rows = evaluate(models, test, args)
     write_evaluation(

@@ -26,6 +26,9 @@
 - GPU: `harness/slurm/gpu-spgpu.sbatch` runs the Navi attention backend
   checks in `harness/gpu_attention.py` and logs the GPU, driver, and
   CUDA plugin and cuDNN package versions. It requires the CUDA backend.
+- Bayesian update: `harness/slurm/bayes-update-spgpu.sbatch` requests 30 minutes
+  and defaults to 20,000 pairwise updates with 16 episodes per update and 32
+  draws per rollout step.
 - Submit from the repository root after preparing the uv environment. Output
   defaults to Slurm's `slurm-<jobid>.out` in the submission directory; inspect
   the final job status and output before reporting success.

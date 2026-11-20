@@ -185,10 +185,12 @@ def prefix_mask(steps, horizon):
     return (steps <= horizon) & (((steps & (steps - 1)) == 0) | (steps == horizon))
 
 
-def rollout_loss(update, readout, y, u, pairs, targets, draws, horizon):
+def rollout_loss(
+    update, readout, y, u, pairs, targets, draws, horizon, *, min_prefix=1
+):
     """Average marginal PFN log loss over the selected rollout steps."""
     steps = jnp.arange(1, draws.shape[0] + 1, dtype=jnp.int32)
-    selected = prefix_mask(steps, horizon)
+    selected = prefix_mask(steps, horizon) & (steps >= min_prefix)
     block_size = draws.shape[1] if draws.ndim == 3 else 1
 
     def advance(state, inputs):
