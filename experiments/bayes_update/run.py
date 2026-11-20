@@ -322,7 +322,8 @@ def parse_args(argv=None):
     parser.add_argument("--query-depth", type=int, default=3)
     parser.add_argument(
         "--pairwise-state",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=False,
         help="use the running mean of draw outer products as the context kernel",
     )
     parser.add_argument(
