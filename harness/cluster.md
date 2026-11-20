@@ -28,7 +28,8 @@
   CUDA plugin and cuDNN package versions. It requires the CUDA backend.
 - Bayesian update: `harness/slurm/bayes-update-spgpu.sbatch` requests 30 minutes
   and defaults to 20,000 pairwise updates with 16 episodes per update and 32
-  draws per rollout step.
+  draws per rollout step. Both state paths use `--k` draws per training step.
+  Evaluation uses `--eval-k` when supplied and `--k` otherwise.
 - Submit from the repository root after preparing the uv environment. Output
   defaults to Slurm's `slurm-<jobid>.out` in the submission directory; inspect
   the final job status and output before reporting success.

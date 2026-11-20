@@ -90,7 +90,7 @@ def make_train_chunk(optimizer, args):
                 episode.panel,
                 episode.draw_key,
                 jnp.arange(args.t_max, dtype=jnp.uint32),
-                args.k if args.pairwise_state else None,
+                args.k,
             )
 
             update, readout, exact, phenotype = models
@@ -205,7 +205,7 @@ def evaluate(models, test_key, args):
     sample = jax.jit(sample_episode, static_argnums=(1, 2, 3))
     baseline_scores = eqx.filter_jit(_baseline_scores)
     rows = []
-    block_size = (args.eval_k or args.k) if args.pairwise_state else None
+    block_size = args.eval_k or args.k
     for index in range(args.test_episodes):
         episode_key, diagnostic_key = jax.random.split(
             jax.random.fold_in(test_key, index)
@@ -326,10 +326,8 @@ def parse_args(argv=None):
         default=False,
         help="use the running mean of draw outer products as the context kernel",
     )
-    parser.add_argument(
-        "--k", type=int, default=16, help="draws per pairwise training step"
-    )
-    parser.add_argument("--eval-k", type=int, help="draws per pairwise evaluation step")
+    parser.add_argument("--k", type=int, default=16, help="draws per training step")
+    parser.add_argument("--eval-k", type=int, help="draws per evaluation step")
     parser.add_argument("--pre-norm", action="store_true")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -357,15 +355,14 @@ def parse_args(argv=None):
     if args.k < 1 or (args.eval_k is not None and args.eval_k < 1):
         parser.error("draw block sizes must be positive")
     if (
-        args.pairwise_state
-        and max(
+        max(
             args.t_max * args.k,
             args.t_max * args.eval_multiplier * (args.eval_k or args.k),
             32 * (args.eval_k or args.k),
         )
         >= 2**31
     ):
-        parser.error("pairwise draw counts must fit in int32")
+        parser.error("draw counts must fit in int32")
     if not 0 <= args.seed < 2**32:
         parser.error("--seed must be in [0, 2**32)")
     return args

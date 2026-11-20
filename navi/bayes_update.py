@@ -129,7 +129,7 @@ class BayesReadout(eqx.Module):
 
 @final
 class BayesUpdate(eqx.Module):
-    """Equivariant running mean of bounded recurrent proposals."""
+    """Equivariant running mean of block-averaged bounded recurrent proposals."""
 
     input_projection: eqx.nn.Linear
     mixer: _Block
@@ -153,11 +153,16 @@ class BayesUpdate(eqx.Module):
         return jnp.zeros((n, self.output_projection.out_features), dtype=jnp.float32)
 
     def drift(self, state, draw, y):
+        block = jnp.atleast_2d(draw)
+        proposals = jax.vmap(self._proposal, in_axes=(None, 0, None))(state, block, y)
+        return proposals.mean(axis=0) - state
+
+    def _proposal(self, state, draw, y):
         inputs = jnp.concatenate((state, draw[:, None], y), axis=1)
         proposal = jax.vmap(self.output_projection)(
             self.mixer(jax.vmap(self.input_projection)(inputs))
         )
-        return jnp.tanh(proposal) - state
+        return jnp.tanh(proposal)
 
     def step(self, state, draw, y, step):
         drift = self.drift(state, draw, y)

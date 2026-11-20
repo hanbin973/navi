@@ -189,3 +189,20 @@ def test_pairwise_blocks_match_pooled_draws_and_rollout_uses_draw_count():
         jnp.int32(2),
     )
     np.testing.assert_allclose(loss, jnp.mean(jnp.stack(expected)), atol=2e-6)
+
+
+def test_recurrent_blocks_average_proposals_and_continue_across_chunks():
+    episode, update, _ = _fixture()
+    state = update.initial_state(len(episode.y))
+    draws = kernel_draws(episode.panel, episode.draw_key, jnp.arange(6))
+    for step, block in enumerate(draws.reshape(2, 3, -1), 1):
+        single_updates = [
+            update.step(state, draw, episode.y, step)[0] for draw in block
+        ]
+        state = jnp.mean(jnp.stack(single_updates), axis=0)
+
+    initial = update.initial_state(len(episode.y))
+    first, step = stream_chunk(update, initial, jnp.int32(0), episode, 1, 3)
+    actual, final = stream_chunk(update, first, step, episode, 1, 3)
+    assert final == 2
+    np.testing.assert_allclose(actual, state, atol=2e-6)
