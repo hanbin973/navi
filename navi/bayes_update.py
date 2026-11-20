@@ -49,7 +49,8 @@ class BayesReadout(eqx.Module):
         base = Navi(
             context_size=1
             + int(bool(exact_kernel or state_width))
-            + int(use_draw_count),
+            + int(use_draw_count)
+            + state_width,
             query_size=1,
             pair_size=1,
             num_ids=1,
@@ -82,8 +83,8 @@ class BayesReadout(eqx.Module):
     def encode_context(self, y, *, state=None, step=None, gram=None, draw_count=None):
         """Encode the context for reuse across query batches.
 
-        The recurrent state supplies a Gram matrix. The step argument is
-        accepted for compatibility with existing rollout callers.
+        The recurrent state supplies token features and a Gram matrix.
+        The step argument is accepted for compatibility with rollout callers.
         """
         if y.ndim != 2 or not y.shape[0]:
             raise ValueError("y must contain a nonempty column of context phenotypes")
@@ -94,6 +95,7 @@ class BayesReadout(eqx.Module):
             if self.state_width:
                 state = _features(state, (n, self.state_width), "state")
                 gram = (state @ state.T) / self.state_width
+                y = jnp.concatenate((y, state), axis=1)
             else:
                 gram = _features(gram, (n, n), "context kernel")
             y = jnp.concatenate((y, jnp.diag(gram)[:, None]), axis=1)

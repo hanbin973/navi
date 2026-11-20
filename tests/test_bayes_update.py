@@ -57,11 +57,25 @@ def test_update_and_readouts_have_context_permutation_symmetry():
     )
 
 
-def test_recurrent_readout_matches_exact_readout_on_state_gram():
+def test_recurrent_gram_path_matches_exact_readout_with_state_features_zeroed():
     episode, _, settings = _fixture()
     _, y, u, pairs, _, _, _ = episode
     recurrent = BayesReadout(state_width=3, **settings)
     exact = BayesReadout(exact_kernel=True, **settings)
+    projection = exact.context_projection
+    weight = jnp.concatenate(
+        (
+            projection.weight[:, :1],
+            jnp.zeros((projection.out_features, 3)),
+            projection.weight[:, 1:],
+        ),
+        axis=1,
+    )
+    recurrent = eqx.tree_at(
+        lambda model: (model.context_projection.weight, model.context_projection.bias),
+        recurrent,
+        (weight, projection.bias),
+    )
     state = jnp.arange(len(y) * 3, dtype=jnp.float32).reshape(len(y), 3) / 8
     gram = (state @ state.T) / state.shape[1]
     np.testing.assert_allclose(
@@ -206,3 +220,13 @@ def test_recurrent_blocks_average_proposals_and_continue_across_chunks():
     actual, final = stream_chunk(update, first, step, episode, 1, 3)
     assert final == 2
     np.testing.assert_allclose(actual, state, atol=2e-6)
+
+
+def test_recurrent_readout_uses_state_features_at_fixed_gram():
+    episode, _, settings = _fixture()
+    readout = BayesReadout(state_width=3, **settings)
+    state = jax.random.normal(jax.random.key(31), (len(episode.y), 3))
+    encode = eqx.filter_jit(BayesReadout.encode_context)
+    positive = encode(readout, episode.y, state=state)
+    negative = encode(readout, episode.y, state=-state)
+    assert not np.allclose(positive[0], negative[0])
