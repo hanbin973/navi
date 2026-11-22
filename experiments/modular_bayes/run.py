@@ -320,6 +320,21 @@ def parse_args(argv=None):
     parser.add_argument("--queries", type=int, default=8)
     parser.add_argument("--steps", type=int, default=20000)
     parser.add_argument(
+        "--learning-rate", type=float, default=1e-3, help="constant Adam learning rate"
+    )
+    parser.add_argument(
+        "--lr-schedule",
+        choices=("constant", "warmup-cosine"),
+        default="constant",
+        help="Adam learning-rate policy",
+    )
+    parser.add_argument(
+        "--peak-learning-rate",
+        type=float,
+        default=0.005,
+        help="peak Adam learning rate for warmup-cosine",
+    )
+    parser.add_argument(
         "--batch-size", type=int, default=32, help="episodes per update"
     )
     parser.add_argument("--test-episodes", type=int, default=128)
@@ -334,6 +349,12 @@ def parse_args(argv=None):
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args(argv)
+    if not np.isfinite(args.learning_rate) or args.learning_rate <= 0:
+        parser.error("--learning-rate must be finite and positive")
+    if not np.isfinite(args.peak_learning_rate) or args.peak_learning_rate <= 0:
+        parser.error("--peak-learning-rate must be finite and positive")
+    if args.lr_schedule == "warmup-cosine" and args.steps < 3:
+        parser.error("--lr-schedule warmup-cosine requires at least three steps")
     counts = (
         args.context_count,
         args.features,
@@ -371,6 +392,30 @@ def parse_args(argv=None):
     return args
 
 
+def make_learning_rate(args):
+    """Return the Adam rate or schedule and its run metadata."""
+    if args.lr_schedule == "constant":
+        return args.learning_rate, {"type": "constant", "value": args.learning_rate}
+
+    warmup_steps = max(1, args.steps // 5)
+    end_value = args.peak_learning_rate * 0.01
+    # Adam counts from zero, so the last update uses schedule(steps - 1).
+    schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=args.peak_learning_rate,
+        warmup_steps=warmup_steps,
+        decay_steps=args.steps - 1,
+        end_value=end_value,
+    )
+    return schedule, {
+        "type": args.lr_schedule,
+        "warmup_steps": warmup_steps,
+        "initial_rate": 0.0,
+        "peak_rate": args.peak_learning_rate,
+        "final_rate": end_value,
+    }
+
+
 def run(args):
     args.output_dir.mkdir(parents=True, exist_ok=False)
     bins, init, train, test, bootstrap = jax.random.split(jax.random.key(args.seed), 5)
@@ -394,14 +439,15 @@ def run(args):
         BarPredictor(state_width=0, exact_kernel=True, key=keys[2], **settings),
         BarPredictor(state_width=0, key=keys[3], **settings),
     )
-    optimizer = optax.adam(1e-3)
+    learning_rate, rate_metadata = make_learning_rate(args)
+    optimizer = optax.adam(learning_rate)
     opt_state = optimizer.init(eqx.filter(models, eqx.is_inexact_array))
     train_chunk = make_train_chunk(optimizer, args)
     metadata = vars(args) | {
         "output_dir": str(args.output_dir),
         "model": settings,
+        "learning_rate_schedule": rate_metadata,
         "device": str(jax.devices()[0]),
-        "learning_rate": 1e-3,
         "reference_run": "bayes-update-66501322",
         "reference_commit": "84a6f52",
         "state_width": 16,
