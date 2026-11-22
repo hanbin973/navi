@@ -12,7 +12,15 @@ from .blocks import _Block, _features
 
 
 class BayesCarry(NamedTuple):
-    """Right-aligned committed history and absolute rollout counters."""
+    """Committed context history and absolute rollout counters.
+
+    Attributes:
+        history: Embeddings [H, N, D] for H history slots, N context rows,
+            and embedding width D. The newest snapshot is in the last slot.
+        valid: Boolean mask [H] marking initialized history slots.
+        step: Scalar count of committed draw blocks.
+        draw_count: Scalar count of individual joint draws consumed.
+    """
 
     history: Array
     valid: Array
@@ -21,7 +29,13 @@ class BayesCarry(NamedTuple):
 
 
 class ContextSnapshot(NamedTuple):
-    """Aligned inputs to the predictor at one rollout prefix."""
+    """Aligned predictor inputs at one rollout prefix.
+
+    Attributes:
+        observations: Context observations [N, 1].
+        embeddings: Latest committed context embeddings [N, D].
+        draw_count: Scalar count of joint draws consumed at this prefix.
+    """
 
     observations: Array
     embeddings: Array
@@ -29,7 +43,12 @@ class ContextSnapshot(NamedTuple):
 
 
 class AbstractProposal(eqx.Module):
-    """Produce one raw candidate per draw block from the committed history."""
+    """Produce one raw candidate per draw block from committed history.
+
+    Attributes:
+        state_width: Embedding width D shared by the history and candidate.
+        history_capacity: Number H of fixed, right-aligned history slots.
+    """
 
     state_width: eqx.AbstractVar[int]
     history_capacity: eqx.AbstractVar[int]
@@ -54,7 +73,12 @@ class AbstractProposal(eqx.Module):
 
 
 class AbstractAttentionBias(eqx.Module):
-    """Produce additive token-attention logits from aligned draws."""
+    """Produce additive token-attention logits from aligned draws.
+
+    Implementations receive draws [N, K] and return a bias tensor
+    [1, heads, N, N] aligned with the mixer's query and key token axes.
+    Reordering draw columns together should preserve the bias up to roundoff.
+    """
 
     @abstractmethod
     def __call__(self, draws: Array) -> Array:
@@ -64,7 +88,15 @@ class AbstractAttentionBias(eqx.Module):
 
 @final
 class SecondMomentAttentionBias(AbstractAttentionBias):
-    """Map pairwise second moments to additive per-head attention logits."""
+    """Map the empirical second moment to per-head attention logits.
+
+    Computes draws @ draws.T / K and applies a shared linear projection
+    to every entry of the resulting context-by-context matrix.
+
+    Args:
+        heads: Number of attention heads to produce biases for.
+        key: JAX PRNG key for initializing the projection.
+    """
 
     projection: eqx.nn.Linear
 
@@ -81,7 +113,20 @@ class SecondMomentAttentionBias(AbstractAttentionBias):
 
 @final
 class AttentionProposal(AbstractProposal):
-    """Mix the latest embeddings, observations, and draw features."""
+    """Propose one candidate from the latest snapshot and a joint draw block.
+
+    Token attention mixes the latest embeddings, observations, and per-token
+    mean squared draws. The output projection returns a raw candidate [N, D].
+
+    Args:
+        state_width: Context embedding and candidate width D.
+        width: Hidden token width of the attention mixer.
+        heads: Number of token-attention heads. Must divide width.
+        pre_norm: Whether to normalize before attention and MLP operations.
+        key: JAX PRNG key for initializing the proposal.
+        attention_bias: Optional module producing additive logits for the
+            mixer's heads and context rows from the same draw block.
+    """
 
     state_width: int = eqx.field(static=True)
     history_capacity: int = eqx.field(static=True, init=False, default=1)
@@ -124,7 +169,12 @@ class AttentionProposal(AbstractProposal):
 
 
 class AbstractIntegrator(eqx.Module):
-    """Integrate one block candidate at a one-based update step."""
+    """Turn one raw block candidate into a committed embedding snapshot.
+
+    Implementations receive the latest embeddings and candidate, both [N, D],
+    and a one-based scalar step. They return the next embeddings and drift
+    with the same shape.
+    """
 
     @abstractmethod
     def __call__(
@@ -136,7 +186,11 @@ class AbstractIntegrator(eqx.Module):
 
 @final
 class TanhRunningMeanIntegrator(AbstractIntegrator):
-    """Bound the block candidate, then take a running-mean step."""
+    """Integrate a block candidate with a bounded running-mean update.
+
+    Computes drift = tanh(candidate) - latest and returns
+    (latest + drift / step, drift). The integrator has no parameters.
+    """
 
     def __call__(self, latest, candidate, step):
         drift = jnp.tanh(candidate) - latest
@@ -145,7 +199,18 @@ class TanhRunningMeanIntegrator(AbstractIntegrator):
 
 @final
 class BayesUpdate(eqx.Module):
-    """Manage history and compose the proposal with the integrator."""
+    """Consume draw blocks and manage the committed context history.
+
+    Each step calls the proposal once, integrates its candidate, and commits
+    one snapshot. The carry can resume a rollout, and snapshot() exposes the
+    latest embeddings and draw count to the predictor.
+
+    Args:
+        proposal: Module mapping committed history and a joint draw block
+            to one raw candidate. Its dimensions determine the carry shape.
+        integrator: Module mapping the raw candidate and latest embeddings
+            to the committed embeddings and drift.
+    """
 
     proposal: AbstractProposal
     integrator: AbstractIntegrator

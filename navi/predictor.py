@@ -49,7 +49,11 @@ def _decode_tokens(model, context, u, pair_features):
 
 
 class AbstractPredictor(eqx.Module):
-    """Prepare context once and predict independent query marginals."""
+    """Prepare a context snapshot and predict independent query marginals.
+
+    Subclasses implement encode_context() and predict(). A context encoding
+    can serve several query batches at the same rollout prefix.
+    """
 
     @abstractmethod
     def encode_context(self, snapshot: ContextSnapshot) -> Context:
@@ -64,7 +68,29 @@ class AbstractPredictor(eqx.Module):
 
 @final
 class BarPredictor(AbstractPredictor):
-    """Predict bar logits using recurrent features and their Gram matrix."""
+    """Predict one row of marginal bar logits per query.
+
+    The context encoder uses the latest embeddings, observations, and
+    embedding Gram matrix. The distribution interprets the output logits
+    for loss and predictive summaries.
+
+    Args:
+        state_width: Width of the committed context embeddings.
+        width: Hidden token width of the attention blocks.
+        num_heads: Number of attention heads. Must divide width.
+        query_depth: Number of query blocks. The context encoder uses
+            query_depth - 1 blocks.
+        bin_edges: Edges defining the full-support bar distribution.
+        key: JAX PRNG key for initializing the predictor.
+        hidden_size: MLP hidden width. Defaults to twice width.
+        zero_init: Whether to zero-initialize attention and MLP residual
+            output projections in the context and query blocks.
+        pre_norm: Whether to normalize before attention and MLP operations.
+        kernel_bias_init_scale: Positive multiplier for initial weights of
+            the query-to-context pair bias projections.
+        use_draw_count: Whether to add 1 / (1 + draw_count) to each context
+            token's input features.
+    """
 
     context_projection: eqx.nn.Linear
     state_width: int = eqx.field(static=True)
