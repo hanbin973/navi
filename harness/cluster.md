@@ -7,12 +7,8 @@ Use [the common Python launcher](slurm/python.sbatch) with
 repository root with a prepared uv environment. Put scheduler options before
 the launcher path and Python arguments after it.
 
-The resource request for completed modular Bayes job `66608378` was
-`spgpu`, account `jonth0`, one GPU, two CPUs, and 32 GB of RAM. Use a wall
-time appropriate to the workload. The common launcher takes resources and
-backend settings from the submission command. GPU smoke job `66644952`
-verified the Python entry point of the common launcher on `spgpu`. It completed in 9 seconds and
-reported a CUDA device and a finite Equinox result.
+The launcher takes resources and backend settings from the submission
+command. Its Python entry point has passed a GPU smoke check on `spgpu`.
 
 ## Scope and safety
 
@@ -30,16 +26,7 @@ reported a CUDA device and a finite Equinox result.
 - Review and adapt resource requests before submission. Do not submit jobs until
   the time limits and environment are confirmed.
 
-## Workload recipes
-
-The [common launcher examples](slurm/python-example.md#workload-commands)
-cover CPU smoke, the GPU attention backend check, historical Bayesian-update
-training, and current modular Bayes training. The example's scheduler option
-table includes the project scripts and the illustrative school reference.
-
-The previous workload-specific scripts remain available during the transition.
-Historical Bayesian-update training requires a checkout with its matching
-library API. The school reference records illustrative values for comparison.
+## Job logs
 
 Slurm writes `slurm-<jobid>.out` in the submission directory by default.
 Inspect the final status and log before reporting that a job succeeded.
