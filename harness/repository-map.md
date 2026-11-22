@@ -17,6 +17,8 @@ changing them.
 - `harness/environment.md` — uv environment and dependency guidance.
 - `harness/development.md` — development checks and verification expectations.
 - `harness/cluster.md` — cluster rules, job prerequisites, and template routing.
+- `harness/slurm/bayes-update-spgpu.sbatch` — GPU job for the held-out
+  Bayesian-update experiment.
 - `harness/slurm/` — draft CPU/GPU batch templates and school reference example.
 - `harness/smoke.py` — small JAX/Equinox device execution check.
 - `harness/gpu_attention.py` — Slurm GPU comparison of Navi attention
@@ -24,14 +26,18 @@ changing them.
 
 ## Application code and tests
 
+- `navi/bayes_update.py` — learned recurrent and pairwise second-moment updates with Navi density readouts.
 - `navi/model.py` — Equinox episode model and dense PFNs block primitives.
 - `navi/helper.py` — abstract query kernel and dataset simulator interfaces,
   Gaussian reference helpers, and training episode assembly.
 - `navi/distribution.py` — fixed PFNs full-support bars, query loss, and
   predictive mean.
 - `navi/__init__.py` — public model and distribution imports.
+- `experiments/bayes_update/` — varying-kernel simulator, prefix training, and
+  held-out extrapolation evaluation.
 - `experiments/gp_experiment/` — fixed-context Gaussian episode simulation,
   Navi training runner, and paired evaluation with oracle BLUP.
+- `tests/test_bayes_update.py` — rollout, symmetry, gradients, and draw checks.
 - `tests/test_gp_experiment.py` — episode, oracle, and runner checks.
 - `tests/test_pfn_port.py` — primitive initialization and pinned PFNs parity.
 - `tests/test_navi_helper.py` — kernel alignment, joint simulation, BLUP
@@ -42,6 +48,8 @@ changing them.
 
 ## Design notes
 
+- `impl/bayes_update/impl_bayes_update.md` — approximate Bayesian update
+  implementation and experiment plan.
 - `impl/gp_experiment/` — Gaussian feature-effect experiment design,
   implementation plan, and verification record.
 - `impl/pfn/` — PFN and TabPFN design notes covering theory, task priors,
