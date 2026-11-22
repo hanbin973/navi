@@ -1,232 +1,178 @@
+from typing import final
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
-from experiments.bayes_update.run import kernel_draws, sample_episode, stream_chunk
-from navi.bayes_update import (
-    BayesReadout,
+from navi import (
+    AbstractIntegrator,
+    AbstractProposal,
+    AttentionProposal,
+    BarPredictor,
     BayesUpdate,
-    PairwiseUpdate,
-    prefix_mask,
+    TanhRunningMeanIntegrator,
+    advance_chunk,
     rollout_loss,
 )
+from navi.bayes_update import prefix_mask
 
 
 def _fixture():
-    data_key, update_key, readout_key = jax.random.split(jax.random.key(17), 3)
-    episode = sample_episode(data_key, 4, 3, 2)
-    update = BayesUpdate(3, 8, 2, pre_norm=True, key=update_key)
-    settings = {
-        "width": 8,
-        "num_heads": 2,
-        "query_depth": 3,
-        "pre_norm": True,
-        "zero_init": False,
-        "bin_edges": (-3.0, -1.0, 0.0, 1.0, 3.0),
-        "key": readout_key,
-    }
-    return episode, update, settings
+    keys = jax.random.split(jax.random.key(17), 6)
+    update = BayesUpdate(
+        AttentionProposal(3, 8, 2, pre_norm=True, key=keys[0]),
+        TanhRunningMeanIntegrator(),
+    )
+    predictor = BarPredictor(
+        state_width=3,
+        width=8,
+        num_heads=2,
+        query_depth=2,
+        pre_norm=True,
+        zero_init=False,
+        bin_edges=(-3, -1, 0, 1, 3),
+        key=keys[1],
+    )
+    y = jax.random.normal(keys[2], (4, 1))
+    u = jax.random.normal(keys[3], (2, 1))
+    pairs = jax.random.normal(keys[4], (2, 4, 1))
+    draws = jax.random.normal(keys[5], (5, 2, 4))
+    return update, predictor, y, u, pairs, draws
 
 
-def test_update_and_readouts_have_context_permutation_symmetry():
-    episode, update, settings = _fixture()
-    _, y, u, pairs, _, gram, _ = episode
-    readout = BayesReadout(state_width=3, **settings)
-    exact = BayesReadout(exact_kernel=True, **settings)
+@pytest.mark.parametrize("block_size", [1, 2])
+def test_update_matches_original_bounded_running_mean(block_size):
+    update, _, y, _, _, draws = _fixture()
     state = update.initial_state(len(y))
-    draw = kernel_draws(episode.panel, episode.draw_key, jnp.arange(1))[0]
-    permutation = jnp.array([2, 0, 3, 1])
-    new_state, _ = update.step(state, draw, y, 1)
-    permuted, _ = update.step(state[permutation], draw[permutation], y[permutation], 1)
-    np.testing.assert_allclose(permuted, new_state[permutation], atol=2e-6)
+    expected = state.history[-1]
+    proposal = update.proposal
+    for step, block in enumerate(draws[:, :block_size], 1):
+        bounded = []
+        for draw in block:
+            inputs = jnp.concatenate((expected, draw[:, None], y), axis=1)
+            hidden = proposal.mixer(jax.vmap(proposal.input_projection)(inputs))
+            bounded.append(jnp.tanh(jax.vmap(proposal.output_projection)(hidden)))
+        expected_drift = jnp.mean(jnp.stack(bounded), axis=0) - expected
+        expected = expected + expected_drift / step
+        draw_input = block[0] if block_size == 1 else block
+        fixed_drift = update.drift(state, draw_input, y)
+        state, drift = update.step(state, draw_input, y)
+        np.testing.assert_allclose(fixed_drift, expected_drift, atol=1e-6)
+        np.testing.assert_allclose(drift, expected_drift, atol=1e-6)
+        np.testing.assert_allclose(state.history[-1], expected, atol=1e-6)
+        assert jnp.all(jnp.abs(state.history[-1]) <= 1)
+        assert state.step == step
+        assert state.draw_count == block_size * step
+
+
+@final
+class HistoryProposal(AbstractProposal):
+    state_width: int = 1
+    history_capacity: int = 3
+
+    def __call__(self, history, valid, draw, observations):
+        weights = jnp.where(valid, jnp.arange(1, 4), 0)
+        return jnp.einsum("h,hnd->nd", weights, history) + draw[:, None]
+
+
+@final
+class CommitMean(AbstractIntegrator):
+    def __call__(self, latest, candidates, step):
+        new = candidates.mean(axis=0)
+        return new, new - latest
+
+
+def test_history_startup_rollover_and_chunk_continuation():
+    update = BayesUpdate(HistoryProposal(), CommitMean())
+    state = update.initial_state(1)
+    np.testing.assert_array_equal(state.valid, [False, False, True])
+    y = jnp.zeros((1, 1))
+    draws = jnp.array([1, 2, 3, 4], dtype=jnp.float32).reshape((4, 1, 1))
+    advance = eqx.filter_jit(advance_chunk)
+    first = advance(update, state, draws[:1], y)
+    np.testing.assert_array_equal(first.valid, [False, True, True])
+    np.testing.assert_array_equal(first.history[:, 0, 0], [0, 0, 1])
+    padded = state._replace(history=state.history.at[:2].set(100))
+    np.testing.assert_array_equal(
+        advance(update, padded, draws[:1], y).history[-1], first.history[-1]
+    )
+    whole = advance(update, state, draws, y)
+    resumed = advance(update, first, draws[1:], y)
+    for actual, expected in zip(resumed, whole, strict=True):
+        np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(whole.history[:, 0, 0], [5, 20, 75])
+    np.testing.assert_array_equal(whole.valid, [True, True, True])
+    assert whole.step == whole.draw_count == 4
+
+
+def test_update_and_predictor_have_context_permutation_symmetry():
+    update, predictor, y, u, pairs, draws = _fixture()
+    initial = update.initial_state(len(y))
+    order = jnp.array([2, 0, 3, 1])
+    state = advance_chunk(update, initial, draws[:2], y)
+    permuted = advance_chunk(update, initial, draws[:2, :, order], y[order])
+    np.testing.assert_allclose(permuted.history, state.history[:, order], atol=2e-6)
+    context = predictor.encode_context(update.snapshot(state, y))
+    permuted_context = predictor.encode_context(update.snapshot(permuted, y[order]))
     np.testing.assert_allclose(
-        readout(y[permutation], u, pairs[:, permutation], state=permuted, step=1),
-        readout(y, u, pairs, state=new_state, step=1),
+        predictor.predict(permuted_context, u, pairs[:, order]),
+        predictor.predict(context, u, pairs),
         atol=2e-6,
     )
-    np.testing.assert_allclose(
-        exact(
-            y[permutation],
-            u,
-            pairs[:, permutation],
-            gram=gram[permutation][:, permutation],
-        ),
-        exact(y, u, pairs, gram=gram),
-        atol=2e-6,
-    )
 
 
-def test_recurrent_gram_path_matches_exact_readout_with_state_features_zeroed():
-    episode, _, settings = _fixture()
-    _, y, u, pairs, _, _, _ = episode
-    recurrent = BayesReadout(state_width=3, **settings)
-    exact = BayesReadout(exact_kernel=True, **settings)
-    projection = exact.context_projection
-    weight = jnp.concatenate(
-        (
-            projection.weight[:, :1],
-            jnp.zeros((projection.out_features, 3)),
-            projection.weight[:, 1:],
-        ),
-        axis=1,
-    )
-    recurrent = eqx.tree_at(
-        lambda model: (model.context_projection.weight, model.context_projection.bias),
-        recurrent,
-        (weight, projection.bias),
-    )
-    state = jnp.arange(len(y) * 3, dtype=jnp.float32).reshape(len(y), 3) / 8
-    gram = (state @ state.T) / state.shape[1]
-    np.testing.assert_allclose(
-        recurrent(y, u, pairs, state=state, step=4),
-        exact(y, u, pairs, gram=gram),
-        atol=2e-6,
-    )
-
-
-def test_update_is_running_mean_of_bounded_proposals():
-    episode, update, _ = _fixture()
-    y = episode.y
-    draws = kernel_draws(episode.panel, episode.draw_key, jnp.arange(5))
-    state = update.initial_state(len(y))
-    proposals = []
-    for step, draw in enumerate(draws, 1):
-        inputs = jnp.concatenate((state, draw[:, None], y), axis=1)
-        hidden = update.mixer(jax.vmap(update.input_projection)(inputs))
-        proposal = jnp.tanh(jax.vmap(update.output_projection)(hidden))
-        proposals.append(proposal)
-        new_state, drift = update.step(state, draw, y, step)
-        np.testing.assert_allclose(drift, proposal - state, atol=1e-6)
-        np.testing.assert_allclose(
-            new_state, jnp.mean(jnp.stack(proposals), axis=0), atol=1e-6
-        )
-        assert jnp.all(jnp.abs(new_state) <= 1)
-        state = new_state
-
-
-def test_scored_rollout_matches_manual_stepping_and_batches():
-    episode, update, settings = _fixture()
-    _, y, u, pairs, targets, _, _ = episode
-    readout = BayesReadout(state_width=3, **settings)
-    draws = kernel_draws(episode.panel, episode.draw_key, jnp.arange(5))
+def test_scored_rollout_matches_manual_prefixes_and_batches():
+    update, predictor, y, u, pairs, draws = _fixture()
+    targets = jnp.array([0.2, -0.1])
+    loss = predictor.distribution.loss
     for horizon, expected in ((1, [1]), (4, [1, 2, 4]), (5, [1, 2, 4, 5])):
         steps = jnp.arange(1, 6)
         np.testing.assert_array_equal(steps[prefix_mask(steps, horizon)], expected)
+
     state = update.initial_state(len(y))
     scores = []
-    for step, draw in enumerate(draws[:3], 1):
-        state, _ = update.step(state, draw, y, step)
-        scores.append(
-            readout.distribution.loss(
-                readout(y, u, pairs, state=state, step=step), targets
-            )
+    for block in draws[:3]:
+        state, _ = update.step(state, block, y)
+        context = predictor.encode_context(update.snapshot(state, y))
+        scores.append(loss(predictor.predict(context, u, pairs), targets))
+
+    def score(sequence, horizon):
+        return rollout_loss(
+            update, predictor, y, u, pairs, targets, sequence, horizon, loss=loss
         )
 
-    def loss(draws, horizon):
-        return rollout_loss(update, readout, y, u, pairs, targets, draws, horizon)
-
-    changed_tail = draws.at[3:].set(1000)
-    batched = eqx.filter_jit(jax.vmap(loss))(
-        jnp.stack((draws, changed_tail)), jnp.array([3, 3])
+    altered = draws.at[3:].set(1000)
+    actual = eqx.filter_jit(jax.vmap(score))(
+        jnp.stack((draws, altered)), jnp.array([3, 3])
     )
-    np.testing.assert_allclose(batched, jnp.mean(jnp.stack(scores)), atol=2e-6)
+    np.testing.assert_allclose(actual, jnp.mean(jnp.stack(scores)), atol=2e-6)
+    with pytest.raises(eqx.EquinoxRuntimeError, match="min_prefix"):
+        eqx.filter_jit(score)(draws, jnp.int32(0)).block_until_ready()
 
 
 def test_late_loss_differentiates_through_early_draw_and_both_networks():
-    episode, update, settings = _fixture()
-    _, y, u, pairs, targets, _, _ = episode
-    readout = BayesReadout(state_width=3, **settings)
-    draws = kernel_draws(episode.panel, episode.draw_key, jnp.arange(3))
+    update, predictor, y, u, pairs, draws = _fixture()
+    targets = jnp.array([0.2, -0.1])
 
-    def late_loss(inputs):
-        update, readout, first = inputs
-        state, step = stream_chunk(
-            update, update.initial_state(len(y)), jnp.int32(0), episode, 1
-        )
-        state, _ = update.step(state, first, y, step + 1)
-        state, _ = update.step(state, draws[2], y, step + 2)
-        return readout.distribution.loss(
-            readout(y, u, pairs, state=state, step=step + 2), targets
+    def score(inputs):
+        update, predictor, first_block = inputs
+        return rollout_loss(
+            update,
+            predictor,
+            y,
+            u,
+            pairs,
+            targets,
+            draws[:3].at[0].set(first_block),
+            3,
+            min_prefix=3,
+            loss=predictor.distribution.loss,
         )
 
-    grads = eqx.filter_jit(eqx.filter_grad(late_loss))((update, readout, draws[1]))
+    grads = eqx.filter_jit(eqx.filter_grad(score))((update, predictor, draws[0]))
     for tree in grads:
         leaves = jax.tree.leaves(tree)
         assert all(np.isfinite(value).all() for value in leaves)
         assert any(np.any(value != 0) for value in leaves)
-
-
-def test_draw_covariance_and_chunk_continuation():
-    episode, update, _ = _fixture()
-    draws = kernel_draws(episode.panel, episode.draw_key, jnp.arange(8192))
-    np.testing.assert_allclose(draws.T @ draws / len(draws), episode.gram, atol=0.07)
-    state = update.initial_state(len(episode.y))
-    full, total = stream_chunk(update, state, jnp.int32(0), episode, 5)
-    first, step = stream_chunk(update, state, jnp.int32(0), episode, 2)
-    chunked, final = stream_chunk(update, first, step, episode, 3)
-    assert final == total == 5
-    np.testing.assert_allclose(full, chunked, atol=2e-6)
-
-
-def test_pairwise_blocks_match_pooled_draws_and_rollout_uses_draw_count():
-    episode, _, settings = _fixture()
-    update = PairwiseUpdate()
-    readout = BayesReadout(exact_kernel=True, use_draw_count=True, **settings)
-    initial = update.initial_state(len(episode.y))
-    state, step = stream_chunk(update, initial, jnp.int32(0), episode, 1, 3)
-    state, step = stream_chunk(update, state, step, episode, 1, 3)
-    draws = kernel_draws(episode.panel, episode.draw_key, jnp.arange(6))
-    gram = draws.T @ draws / 6
-    np.testing.assert_allclose(state, gram, atol=2e-6)
-    assert step == 2
-
-    expected = []
-    for count in (3, 6):
-        prefix = draws[:count]
-        logits = readout(
-            episode.y,
-            episode.u,
-            episode.pairs,
-            gram=prefix.T @ prefix / count,
-            draw_count=count,
-        )
-        expected.append(readout.distribution.loss(logits, episode.targets))
-    loss = eqx.filter_jit(rollout_loss)(
-        update,
-        readout,
-        episode.y,
-        episode.u,
-        episode.pairs,
-        episode.targets,
-        draws.reshape(2, 3, -1),
-        jnp.int32(2),
-    )
-    np.testing.assert_allclose(loss, jnp.mean(jnp.stack(expected)), atol=2e-6)
-
-
-def test_recurrent_blocks_average_proposals_and_continue_across_chunks():
-    episode, update, _ = _fixture()
-    state = update.initial_state(len(episode.y))
-    draws = kernel_draws(episode.panel, episode.draw_key, jnp.arange(6))
-    for step, block in enumerate(draws.reshape(2, 3, -1), 1):
-        single_updates = [
-            update.step(state, draw, episode.y, step)[0] for draw in block
-        ]
-        state = jnp.mean(jnp.stack(single_updates), axis=0)
-
-    initial = update.initial_state(len(episode.y))
-    first, step = stream_chunk(update, initial, jnp.int32(0), episode, 1, 3)
-    actual, final = stream_chunk(update, first, step, episode, 1, 3)
-    assert final == 2
-    np.testing.assert_allclose(actual, state, atol=2e-6)
-
-
-def test_recurrent_readout_uses_state_features_at_fixed_gram():
-    episode, _, settings = _fixture()
-    readout = BayesReadout(state_width=3, **settings)
-    state = jax.random.normal(jax.random.key(31), (len(episode.y), 3))
-    encode = eqx.filter_jit(BayesReadout.encode_context)
-    positive = encode(readout, episode.y, state=state)
-    negative = encode(readout, episode.y, state=-state)
-    assert not np.allclose(positive[0], negative[0])
