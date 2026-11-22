@@ -1,11 +1,13 @@
 """Navi's modular Bayesian update and prediction API."""
 
 from .bayes_update import (
+    AbstractAttentionBias,
     AbstractIntegrator,
     AbstractProposal,
     AttentionProposal,
     BayesUpdate,
     ContextSnapshot,
+    SecondMomentAttentionBias,
     TanhRunningMeanIntegrator,
     UpdateState,
     advance_chunk,
@@ -15,6 +17,7 @@ from .distribution import FullSupportBarDistribution
 from .predictor import AbstractPredictor, BarPredictor
 
 __all__ = [
+    "AbstractAttentionBias",
     "AbstractIntegrator",
     "AbstractPredictor",
     "AbstractProposal",
@@ -23,6 +26,7 @@ __all__ = [
     "BayesUpdate",
     "ContextSnapshot",
     "FullSupportBarDistribution",
+    "SecondMomentAttentionBias",
     "TanhRunningMeanIntegrator",
     "UpdateState",
     "advance_chunk",

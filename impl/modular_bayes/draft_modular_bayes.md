@@ -26,8 +26,8 @@ Each interface below extends `eqx.Module`.
 
 | Abstract interface | Required methods and attributes | Initial final implementation |
 | --- | --- | --- |
-| `AbstractProposal` | `__call__(history, valid, draw, observations)` returns one raw candidate of shape `[N, D]`. Declare `state_width` and `history_capacity` with `eqx.AbstractVar`. | `AttentionProposal` owns the projections and attention mixer and reads one snapshot. A multi-snapshot proposal implements the same interface with a larger capacity. |
-| `AbstractIntegrator` | `__call__(latest, candidates, step)` takes the stacked candidates of shape `[K, N, D]` and returns the next embeddings and drift. | `TanhRunningMeanIntegrator` is parameter-free and applies the existing running-mean rule. |
+| `AbstractProposal` | `__call__(history, valid, draws, observations)` receives the whole `[N, K]` draw block and returns one raw `[N, D]` candidate. Declare `state_width` and `history_capacity` with `eqx.AbstractVar`. | `AttentionProposal` reads one snapshot and accepts an optional attention bias module. A multi-snapshot proposal implements the same interface with a larger capacity. |
+| `AbstractIntegrator` | `__call__(latest, candidate, step)` takes one `[N, D]` candidate and returns the next embeddings and drift. | `TanhRunningMeanIntegrator` is parameter-free and applies the running-mean rule to the bounded block candidate. |
 | `AbstractPredictor` | `encode_context(snapshot)` returns the predictor's reusable encoding. `predict(encoded_context, query_features, pair_features)` consumes that encoding and returns marginal logits. | `BarPredictor` owns the recurrent readout and produces bar logits. |
 
 Mark the required methods with `abc.abstractmethod` and the concrete modules
@@ -38,8 +38,8 @@ and adapt concrete modules by composition.
 
 Keep `BayesUpdate` final. It accepts an `AbstractProposal` and an
 `AbstractIntegrator` as fields and owns their shared rollout orchestration.
-It initializes the carry using the proposal's declared dimensions, maps the
-proposal across draws, calls the integrator, and commits the result. A future
+It initializes the carry using the proposal's declared dimensions, calls the
+proposal once per block, calls the integrator, and commits the result. A future
 proposal or integration rule can be added through those interfaces.
 
 ## Bayesian update
@@ -52,18 +52,34 @@ a step count of zero, and any history required by the configured proposal.
 
 At update step `t`, starting at one:
 
-1. The **proposal** reads the same pre-step context history and observations
-   for every draw in the block. It uses the input projection, attention mixer,
-   and output projection to produce a raw candidate with shape `[N, D]` for
-   each draw, where `D` is the embedding width.
-2. The **integrator** applies `tanh` to each raw candidate, then averages the
-   bounded candidates over the draw axis to obtain `target`. It computes
-   `drift = target - latest` and commits `latest + drift / t`. Applying
-   `tanh` before averaging preserves the existing update.
-3. The **updater** advances the carry, records the committed embeddings in
-   history, and exposes the new snapshot. It can return drift for
-   diagnostics, which also need to evaluate candidate drift
-   against a fixed carry without committing an update.
+1. The **updater** transposes the sampler's `[K, N]` block to `[N, K]`.
+   Each column is a joint draw. Together with aligned observations and
+   committed history, the block enters one call to the proposal.
+2. The **proposal** returns a raw `[N, D]` candidate. Draw-column order
+   should leave the result invariant up to roundoff. The initial token
+   projection uses per-token mean squared draws, observations, and the
+   latest embeddings. A separately configured `AbstractAttentionBias`
+   maps the aligned `[N, K]` draw block to additive logits
+   `[1, heads, N, N]` for the mixer. Bias implementations share the
+   draw-order invariance requirement. The mixer also supports plain
+   attention when the proposal is constructed without a bias module.
+   `SecondMomentAttentionBias` is one option and maps
+   `draws @ draws.T / K` to per-head biases.
+3. The **integrator** computes `drift = tanh(candidate) - latest` and
+   `next = latest + drift / t`. The updater commits one snapshot and adds
+   `K` to the draw count. Diagnostics can evaluate drift without committing.
+
+### Bayesian-update reference
+
+Use the historical Bayesian-update runs for comparisons at equal cumulative
+draw counts. At 512 draws, held-out NLL was 0.9258 for the single-draw
+recurrent evaluation, 0.8297 for the 32-draw recurrent update that pooled
+independent candidates, and 0.8219 for the 32-draw pairwise second moment.
+The runs motivate joint block processing. They used different configurations,
+so a matched evaluation is needed to measure the effect of the new proposal.
+See the [single-draw run](../../runs/bayes-update-66493135/summary.json),
+[pooled recurrent run](../../runs/bayes-update-66501322/summary.json), and
+[pairwise run](../../runs/bayes-update-66490382/summary.json).
 
 The current weighted average is over update blocks. A rollout uses a fixed
 block size and carries the absolute step through chunk boundaries. Track the
@@ -77,10 +93,9 @@ Define history over previously committed context embeddings along the update
 axis. With history capacity `H`, the proposal receives an `[H, N, D]`
 window ordered oldest to newest, with a validity mask for slots preceding
 initialization. The initialized zero state is a valid first snapshot.
-Start with `H=1`, which gives the proposal the immediate predecessor and
-preserves the current computation. A later proposal can use several
-snapshots per context row, with the same row permutation applied across the
-whole window.
+The initial block proposal uses `H=1` and reads the immediate predecessor.
+A later proposal can use several snapshots per context row, with the same
+row permutation applied across the whole window.
 
 Keep capacity fixed for a compiled rollout and store history in the scan carry
 so chunked evaluation sees the same window as a single scan. Advance history
@@ -90,10 +105,10 @@ history capacity.
 ### Future axial attention proposal
 
 The proposal interface already supplies the committed history, its validity
-mask, and one fresh draw. An axial proposal with total time length `L`
+mask, and a full fresh draw block. An axial proposal with total time length `L`
 declares `history_capacity = L - 1` for `L >= 2`. Use the `L - 1` most recent
-committed snapshots, from `b[t-L+1]` through `b[t-1]`. Project the fresh
-draw into an initial `[N, D]` slice for time `t` and append it to form an
+committed snapshots, from `b[t-L+1]` through `b[t-1]`. Encode the whole fresh
+draw block into an initial `[N, D]` slice for time `t` and append it to form an
 `[L, N, D]` tensor. The proposal owns that projection. Append a valid entry
 to the history mask for the new slice.
 
@@ -104,13 +119,14 @@ to the history mask for the new slice.
 - Along **tokens**, use plain attention across the `N` context rows
   independently at each time slice.
 - Return the final time slice, `output[L - 1]`, as the raw `[N, D]`
-  candidate. The existing updater maps this proposal over draws, and the
-  integrator consumes the resulting `[K, N, D]` candidates.
+  candidate. The updater calls this proposal once per block and the
+  integrator consumes the resulting candidate.
 
 This fits the existing proposal, integrator, and predictor contracts.
-Axial attention is a follow-up implementation. When added, verify that
-changing padded history values leaves the proposal unchanged and that a
-time-attention output is independent of later slices.
+Begin axial attention only after the one-snapshot block contract is settled
+and verified. When axial attention is added, verify that changing padded
+history values leaves the proposal unchanged and that a time-attention
+output is independent of later slices.
 
 ## Predictor
 
@@ -131,14 +147,13 @@ context advances.
 
 ## Refactor checks
 
-- Compare the one-slot proposal and integrator with the current recurrent
-  update for fixed weights and draws, including multi-draw blocks. Verify the
-  drift and committed embeddings independently.
+- Verify one bounded candidate per block for single and multiple draws.
+  Test invariance to joint column reordering and sensitivity to breaking
+  cross-token draw alignment.
 - Compare one scan with chunked continuation at the same draw prefix. When a
   multi-slot proposal is added, exercise startup masking, window rollover,
   and chunk boundaries.
-- Compare readout logits and prefix loss with the current path using the same
-  context, queries, and weights. Exercise context reuse and verify that
+- Compare scored prefix loss with manual scoring of the same rollout. Exercise context reuse and verify that
   permuting context rows together with draw and pair-feature axes leaves
   query logits invariant.
 - Retain the gradient check from a late-prefix score through early draws and

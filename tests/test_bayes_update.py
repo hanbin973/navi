@@ -7,11 +7,13 @@ import numpy as np
 import pytest
 
 from navi import (
+    AbstractAttentionBias,
     AbstractIntegrator,
     AbstractProposal,
     AttentionProposal,
     BarPredictor,
     BayesUpdate,
+    SecondMomentAttentionBias,
     TanhRunningMeanIntegrator,
     advance_chunk,
     rollout_loss,
@@ -20,9 +22,16 @@ from navi.bayes_update import prefix_mask
 
 
 def _fixture():
-    keys = jax.random.split(jax.random.key(17), 6)
+    keys = jax.random.split(jax.random.key(17), 7)
     update = BayesUpdate(
-        AttentionProposal(3, 8, 2, pre_norm=True, key=keys[0]),
+        AttentionProposal(
+            3,
+            8,
+            2,
+            pre_norm=True,
+            key=keys[0],
+            attention_bias=SecondMomentAttentionBias(2, key=keys[6]),
+        ),
         TanhRunningMeanIntegrator(),
     )
     predictor = BarPredictor(
@@ -43,18 +52,14 @@ def _fixture():
 
 
 @pytest.mark.parametrize("block_size", [1, 2])
-def test_update_matches_original_bounded_running_mean(block_size):
+def test_update_integrates_one_joint_candidate(block_size):
     update, _, y, _, _, draws = _fixture()
     state = update.initial_state(len(y))
     expected = state.history[-1]
     proposal = update.proposal
     for step, block in enumerate(draws[:, :block_size], 1):
-        bounded = []
-        for draw in block:
-            inputs = jnp.concatenate((expected, draw[:, None], y), axis=1)
-            hidden = proposal.mixer(jax.vmap(proposal.input_projection)(inputs))
-            bounded.append(jnp.tanh(jax.vmap(proposal.output_projection)(hidden)))
-        expected_drift = jnp.mean(jnp.stack(bounded), axis=0) - expected
+        candidate = proposal(state.history, state.valid, block.T, y)
+        expected_drift = jnp.tanh(candidate) - expected
         expected = expected + expected_drift / step
         draw_input = block[0] if block_size == 1 else block
         fixed_drift = update.drift(state, draw_input, y)
@@ -72,20 +77,21 @@ class HistoryProposal(AbstractProposal):
     state_width: int = 1
     history_capacity: int = 3
 
-    def __call__(self, history, valid, draw, observations):
+    def __call__(self, history, valid, draws, observations):
         weights = jnp.where(valid, jnp.arange(1, 4), 0)
-        return jnp.einsum("h,hnd->nd", weights, history) + draw[:, None]
+        return jnp.einsum("h,hnd->nd", weights, history) + draws.mean(
+            axis=1, keepdims=True
+        )
 
 
 @final
-class CommitMean(AbstractIntegrator):
-    def __call__(self, latest, candidates, step):
-        new = candidates.mean(axis=0)
-        return new, new - latest
+class CommitCandidate(AbstractIntegrator):
+    def __call__(self, latest, candidate, step):
+        return candidate, candidate - latest
 
 
 def test_history_startup_rollover_and_chunk_continuation():
-    update = BayesUpdate(HistoryProposal(), CommitMean())
+    update = BayesUpdate(HistoryProposal(), CommitCandidate())
     state = update.initial_state(1)
     np.testing.assert_array_equal(state.valid, [False, False, True])
     y = jnp.zeros((1, 1))
@@ -105,6 +111,35 @@ def test_history_startup_rollover_and_chunk_continuation():
     np.testing.assert_array_equal(whole.history[:, 0, 0], [5, 20, 75])
     np.testing.assert_array_equal(whole.valid, [True, True, True])
     assert whole.step == whole.draw_count == 4
+
+
+def test_attention_proposal_accepts_alternative_bias_or_no_bias():
+    @final
+    class DrawMeanBias(AbstractAttentionBias):
+        def __call__(self, draws):
+            mean = draws.mean(axis=1)
+            return jnp.broadcast_to(jnp.outer(mean, mean), (1, 2, len(mean), len(mean)))
+
+    _, _, y, _, _, draws = _fixture()
+    block = draws[0]
+    key = jax.random.key(24)
+    plain = AttentionProposal(3, 8, 2, pre_norm=True, key=key)
+    biased = AttentionProposal(
+        3, 8, 2, pre_norm=True, key=key, attention_bias=DrawMeanBias()
+    )
+    args = (jnp.zeros((1, len(y), 3)), jnp.array([True]), block.T, y)
+    assert plain(*args).shape == biased(*args).shape == (len(y), 3)
+    assert not np.allclose(plain(*args), biased(*args))
+
+
+def test_joint_proposal_uses_draw_alignment_and_ignores_draw_order():
+    update, _, y, _, _, draws = _fixture()
+    state = update.initial_state(len(y))
+    block = draws[0]
+    original = update.drift(state, block, y)
+    np.testing.assert_allclose(update.drift(state, block[::-1], y), original, atol=1e-6)
+    realigned = block.at[:, 0].set(block[::-1, 0])
+    assert not np.allclose(update.drift(state, realigned, y), original)
 
 
 def test_update_and_predictor_have_context_permutation_symmetry():

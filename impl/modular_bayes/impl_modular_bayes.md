@@ -5,10 +5,47 @@ defines the updater, predictor, and future axial proposal. This plan covers
 the authorized library refactor and verification. See the execution record
 for completed work and check results.
 
-Keep the existing one-snapshot recurrent computation and bar readout as the
-initial implementations. Axial attention is a follow-up. Existing experiments,
+Use the one-snapshot block proposal and bar readout as the current
+implementations. Axial attention is a follow-up. Existing experiments,
 their job entry points, and their checkpoints belong to their original Git
 commits. The new library can change imports, signatures, and checkpoint layout.
+
+## Current follow-up. Joint draw-block contract
+
+The original refactor and its verification are recorded below. This
+follow-up supersedes its per-draw proposal and averaging rule.
+
+1. In `navi/bayes_update.py`, transpose `[K, N]` sampler blocks once at
+   the proposal boundary. Pass `[N, K]` alongside history and observations.
+   Call the proposal once per block. Keep one committed snapshot per step
+   and add `K` to the draw count.
+2. Use a one-snapshot, block-aware `AttentionProposal`. Feed the block
+   per-token mean squared draws to the input projection. Inject an
+   optional `AbstractAttentionBias` to map the aligned draw block into
+   additive attention logits. Supply `SecondMomentAttentionBias` explicitly
+   when using the empirical second moment as the bias. Integrate one
+   `[N, D]` candidate with `tanh` followed by the running-mean step.
+3. Update library tests for single- and multi-draw integration, draw-order
+   invariance, and sensitivity to joint draw alignment. Retain chunking,
+   masking, query symmetry, and gradient coverage. Run the CPU suite,
+   targeted Ruff lint and formatting, and the experiment-tree diff check.
+4. Use the Bayesian-update runs linked in the draft as the evaluation
+   reference. The pooled 32-draw recurrent and pairwise second-moment
+   runs provide learned and kernel-estimation baselines at equal draw
+   budgets. A matched training run is separate from library verification.
+
+Axial attention stays deferred until the block proposal contract is settled.
+Existing experiment sources and replay artifacts stay at their recorded APIs.
+
+Steps 1–3 are implemented. All 27 CPU tests passed with
+`JAX_PLATFORMS=cpu .venv/bin/pytest -q`. Ruff lint and formatting passed for
+`navi` and `tests`, and `git diff --check` passed. Git reported no changes
+under `experiments/` or `runs/`. Tests exercise plain attention, the
+second-moment example, and a separate draw-mean bias implementation.
+Step 4 records the historical references.
+Matched training and GPU evaluation remain unmeasured.
+
+## Original refactor record
 
 ## 1. Extract the shared blocks and establish reference checks
 

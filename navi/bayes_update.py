@@ -1,4 +1,4 @@
-"""Compose a per-draw proposal and a block integrator."""
+"""Compose a joint draw-block proposal and a block integrator."""
 
 from abc import abstractmethod
 from typing import NamedTuple, final
@@ -29,16 +29,20 @@ class ContextSnapshot(NamedTuple):
 
 
 class AbstractProposal(eqx.Module):
-    """Produce one raw candidate per draw from the committed history."""
+    """Produce one raw candidate per draw block from the committed history."""
 
     state_width: eqx.AbstractVar[int]
     history_capacity: eqx.AbstractVar[int]
 
     @abstractmethod
     def __call__(
-        self, history: Array, valid: Array, draw: Array, observations: Array
+        self, history: Array, valid: Array, draws: Array, observations: Array
     ) -> Array:
-        """Map history [H, N, D] and one draw [N] to a candidate [N, D]."""
+        """Map history [H, N, D] and aligned draws [N, K] to [N, D].
+
+        Each column is a joint draw. Reordering columns together must
+        preserve the proposal up to floating-point roundoff.
+        """
         raise NotImplementedError
 
     def __check_init__(self):
@@ -49,17 +53,46 @@ class AbstractProposal(eqx.Module):
                 )
 
 
+class AbstractAttentionBias(eqx.Module):
+    """Produce additive token-attention logits from aligned draws."""
+
+    @abstractmethod
+    def __call__(self, draws: Array) -> Array:
+        """Map a draw block [N, K] to bias [1, heads, N, N]."""
+        raise NotImplementedError
+
+
+@final
+class SecondMomentAttentionBias(AbstractAttentionBias):
+    """Map pairwise second moments to additive per-head attention logits."""
+
+    projection: eqx.nn.Linear
+
+    def __init__(self, heads: int, *, key: Array):
+        self.projection = eqx.nn.Linear(
+            1, heads, use_bias=False, dtype=jnp.float32, key=key
+        )
+
+    def __call__(self, draws: Array) -> Array:
+        moment = (draws @ draws.T) / draws.shape[1]
+        bias = jax.vmap(jax.vmap(self.projection))(moment[..., None])
+        return bias.transpose(2, 0, 1)[None]
+
+
 @final
 class AttentionProposal(AbstractProposal):
-    """Mix the immediate predecessor, current draw, and observations."""
+    """Mix the latest embeddings, observations, and draw features."""
 
     state_width: int = eqx.field(static=True)
     history_capacity: int = eqx.field(static=True, init=False, default=1)
     input_projection: eqx.nn.Linear
+    attention_bias: AbstractAttentionBias | None
     mixer: _Block
     output_projection: eqx.nn.Linear
 
-    def __init__(self, state_width, width, heads, *, pre_norm, key):
+    def __init__(
+        self, state_width, width, heads, *, pre_norm, key, attention_bias=None
+    ):
         if any(
             type(size) is not int or size < 1 for size in (state_width, width, heads)
         ):
@@ -73,6 +106,7 @@ class AttentionProposal(AbstractProposal):
         self.input_projection = eqx.nn.Linear(
             state_width + 2, width, key=first, dtype=jnp.float32
         )
+        self.attention_bias = attention_bias
         self.mixer = _Block(
             width, heads, 2 * width, zero_init=False, pre_norm=pre_norm, key=middle
         )
@@ -80,19 +114,21 @@ class AttentionProposal(AbstractProposal):
             width, state_width, key=last, dtype=jnp.float32
         )
 
-    def __call__(self, history, valid, draw, observations):
-        inputs = jnp.concatenate((history[-1], draw[:, None], observations), axis=1)
-        return jax.vmap(self.output_projection)(
-            self.mixer(jax.vmap(self.input_projection)(inputs))
-        )
+    def __call__(self, history, valid, draws, observations):
+        draw_energy = jnp.mean(jnp.square(draws), axis=1, keepdims=True)
+        inputs = jnp.concatenate((history[-1], draw_energy, observations), axis=1)
+        tokens = jax.vmap(self.input_projection)(inputs)
+        bias = None if self.attention_bias is None else self.attention_bias(draws)
+        hidden = self.mixer(tokens, bias=bias)
+        return jax.vmap(self.output_projection)(hidden)
 
 
 class AbstractIntegrator(eqx.Module):
-    """Integrate a block of candidates at a one-based update step."""
+    """Integrate one block candidate at a one-based update step."""
 
     @abstractmethod
     def __call__(
-        self, latest: Array, candidates: Array, step: Array
+        self, latest: Array, candidate: Array, step: Array
     ) -> tuple[Array, Array]:
         """Return the committed embeddings and drift, both shaped [N, D]."""
         raise NotImplementedError
@@ -100,10 +136,10 @@ class AbstractIntegrator(eqx.Module):
 
 @final
 class TanhRunningMeanIntegrator(AbstractIntegrator):
-    """Average bounded candidates, then take a running-mean step."""
+    """Bound the block candidate, then take a running-mean step."""
 
-    def __call__(self, latest, candidates, step):
-        drift = jnp.tanh(candidates).mean(axis=0) - latest
+    def __call__(self, latest, candidate, step):
+        drift = jnp.tanh(candidate) - latest
         return latest + drift / jnp.asarray(step, dtype=latest.dtype), drift
 
 
@@ -134,10 +170,8 @@ class BayesUpdate(eqx.Module):
             raise ValueError("draws must be a nonempty block")
         block = _features(block, (block.shape[0], n), "draws")
         observations = _features(observations, (n, 1), "observations")
-        candidates = jax.vmap(self.proposal, in_axes=(None, None, 0, None))(
-            state.history, state.valid, block, observations
-        )
-        return self.integrator(state.history[-1], candidates, state.step + 1)
+        candidate = self.proposal(state.history, state.valid, block.T, observations)
+        return self.integrator(state.history[-1], candidate, state.step + 1)
 
     def drift(self, state: UpdateState, draw: Array, observations: Array) -> Array:
         """Evaluate drift against a fixed state."""
