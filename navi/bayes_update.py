@@ -11,7 +11,7 @@ from jax import Array
 from .blocks import _Block, _features
 
 
-class UpdateState(NamedTuple):
+class BayesCarry(NamedTuple):
     """Right-aligned committed history and absolute rollout counters."""
 
     history: Array
@@ -150,54 +150,54 @@ class BayesUpdate(eqx.Module):
     proposal: AbstractProposal
     integrator: AbstractIntegrator
 
-    def initial_state(self, n: int) -> UpdateState:
+    def initial_state(self, n: int) -> BayesCarry:
         if n < 1:
             raise ValueError("at least one context token is required")
         capacity = self.proposal.history_capacity
-        return UpdateState(
+        return BayesCarry(
             jnp.zeros((capacity, n, self.proposal.state_width), dtype=jnp.float32),
             jnp.arange(capacity) == capacity - 1,
             jnp.int32(0),
             jnp.int32(0),
         )
 
-    def snapshot(self, state: UpdateState, observations: Array) -> ContextSnapshot:
-        return ContextSnapshot(observations, state.history[-1], state.draw_count)
+    def snapshot(self, carry: BayesCarry, observations: Array) -> ContextSnapshot:
+        return ContextSnapshot(observations, carry.history[-1], carry.draw_count)
 
-    def _integrate(self, state, block, observations):
-        n = state.history.shape[1]
+    def _integrate(self, carry, block, observations):
+        n = carry.history.shape[1]
         if block.ndim != 2 or not block.shape[0]:
             raise ValueError("draws must be a nonempty block")
         block = _features(block, (block.shape[0], n), "draws")
         observations = _features(observations, (n, 1), "observations")
-        candidate = self.proposal(state.history, state.valid, block.T, observations)
-        return self.integrator(state.history[-1], candidate, state.step + 1)
+        candidate = self.proposal(carry.history, carry.valid, block.T, observations)
+        return self.integrator(carry.history[-1], candidate, carry.step + 1)
 
-    def drift(self, state: UpdateState, draw: Array, observations: Array) -> Array:
-        """Evaluate drift against a fixed state."""
-        return self._integrate(state, jnp.atleast_2d(draw), observations)[1]
+    def drift(self, carry: BayesCarry, draw: Array, observations: Array) -> Array:
+        """Evaluate drift against a fixed carry."""
+        return self._integrate(carry, jnp.atleast_2d(draw), observations)[1]
 
     def step(
-        self, state: UpdateState, draw: Array, observations: Array
-    ) -> tuple[UpdateState, Array]:
+        self, carry: BayesCarry, draw: Array, observations: Array
+    ) -> tuple[BayesCarry, Array]:
         """Consume one draw [N] or block [K, N] and commit one snapshot."""
         block = jnp.atleast_2d(draw)
-        latest, drift = self._integrate(state, block, observations)
-        history = jnp.concatenate((state.history[1:], latest[None]), axis=0)
-        valid = jnp.concatenate((state.valid[1:], jnp.ones((1,), dtype=bool)))
-        return UpdateState(
-            history, valid, state.step + 1, state.draw_count + block.shape[0]
+        latest, drift = self._integrate(carry, block, observations)
+        history = jnp.concatenate((carry.history[1:], latest[None]), axis=0)
+        valid = jnp.concatenate((carry.valid[1:], jnp.ones((1,), dtype=bool)))
+        return BayesCarry(
+            history, valid, carry.step + 1, carry.draw_count + block.shape[0]
         ), drift
 
 
-def advance_chunk(update, state: UpdateState, draws: Array, observations: Array):
+def advance_chunk(update, carry: BayesCarry, draws: Array, observations: Array):
     """Consume a sequence of single draws [T, N] or blocks [T, K, N]."""
 
     def advance(carry, draw):
         current, _ = update.step(carry, draw, observations)
         return current, None
 
-    return jax.lax.scan(advance, state, draws)[0]
+    return jax.lax.scan(advance, carry, draws)[0]
 
 
 def prefix_mask(steps, horizon):
@@ -221,20 +221,20 @@ def rollout_loss(
     steps = jnp.arange(1, length + 1, dtype=jnp.int32)
     selected = prefix_mask(steps, horizon) & (steps >= min_prefix)
 
-    def advance(state, inputs):
+    def advance(carry, inputs):
         draw, step, score = inputs
-        state = jax.lax.cond(
-            step <= horizon, lambda: update.step(state, draw, y)[0], lambda: state
+        carry = jax.lax.cond(
+            step <= horizon, lambda: update.step(carry, draw, y)[0], lambda: carry
         )
 
         def score_context():
-            context = predictor.encode_context(update.snapshot(state, y))
+            context = predictor.encode_context(update.snapshot(carry, y))
             return jnp.asarray(
                 loss(predictor.predict(context, u, pairs), targets), dtype=jnp.float32
             )
 
         nll = jax.lax.cond(score, score_context, lambda: jnp.float32(0))
-        return state, nll
+        return carry, nll
 
     _, scores = jax.lax.scan(
         advance, update.initial_state(y.shape[0]), (draws, steps, selected)

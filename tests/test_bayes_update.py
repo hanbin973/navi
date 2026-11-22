@@ -54,22 +54,22 @@ def _fixture():
 @pytest.mark.parametrize("block_size", [1, 2])
 def test_update_integrates_one_joint_candidate(block_size):
     update, _, y, _, _, draws = _fixture()
-    state = update.initial_state(len(y))
-    expected = state.history[-1]
+    carry = update.initial_state(len(y))
+    expected = carry.history[-1]
     proposal = update.proposal
     for step, block in enumerate(draws[:, :block_size], 1):
-        candidate = proposal(state.history, state.valid, block.T, y)
+        candidate = proposal(carry.history, carry.valid, block.T, y)
         expected_drift = jnp.tanh(candidate) - expected
         expected = expected + expected_drift / step
         draw_input = block[0] if block_size == 1 else block
-        fixed_drift = update.drift(state, draw_input, y)
-        state, drift = update.step(state, draw_input, y)
+        fixed_drift = update.drift(carry, draw_input, y)
+        carry, drift = update.step(carry, draw_input, y)
         np.testing.assert_allclose(fixed_drift, expected_drift, atol=1e-6)
         np.testing.assert_allclose(drift, expected_drift, atol=1e-6)
-        np.testing.assert_allclose(state.history[-1], expected, atol=1e-6)
-        assert jnp.all(jnp.abs(state.history[-1]) <= 1)
-        assert state.step == step
-        assert state.draw_count == block_size * step
+        np.testing.assert_allclose(carry.history[-1], expected, atol=1e-6)
+        assert jnp.all(jnp.abs(carry.history[-1]) <= 1)
+        assert carry.step == step
+        assert carry.draw_count == block_size * step
 
 
 @final
@@ -92,19 +92,19 @@ class CommitCandidate(AbstractIntegrator):
 
 def test_history_startup_rollover_and_chunk_continuation():
     update = BayesUpdate(HistoryProposal(), CommitCandidate())
-    state = update.initial_state(1)
-    np.testing.assert_array_equal(state.valid, [False, False, True])
+    carry = update.initial_state(1)
+    np.testing.assert_array_equal(carry.valid, [False, False, True])
     y = jnp.zeros((1, 1))
     draws = jnp.array([1, 2, 3, 4], dtype=jnp.float32).reshape((4, 1, 1))
     advance = eqx.filter_jit(advance_chunk)
-    first = advance(update, state, draws[:1], y)
+    first = advance(update, carry, draws[:1], y)
     np.testing.assert_array_equal(first.valid, [False, True, True])
     np.testing.assert_array_equal(first.history[:, 0, 0], [0, 0, 1])
-    padded = state._replace(history=state.history.at[:2].set(100))
+    padded = carry._replace(history=carry.history.at[:2].set(100))
     np.testing.assert_array_equal(
         advance(update, padded, draws[:1], y).history[-1], first.history[-1]
     )
-    whole = advance(update, state, draws, y)
+    whole = advance(update, carry, draws, y)
     resumed = advance(update, first, draws[1:], y)
     for actual, expected in zip(resumed, whole, strict=True):
         np.testing.assert_array_equal(actual, expected)
@@ -134,22 +134,22 @@ def test_attention_proposal_accepts_alternative_bias_or_no_bias():
 
 def test_joint_proposal_uses_draw_alignment_and_ignores_draw_order():
     update, _, y, _, _, draws = _fixture()
-    state = update.initial_state(len(y))
+    carry = update.initial_state(len(y))
     block = draws[0]
-    original = update.drift(state, block, y)
-    np.testing.assert_allclose(update.drift(state, block[::-1], y), original, atol=1e-6)
+    original = update.drift(carry, block, y)
+    np.testing.assert_allclose(update.drift(carry, block[::-1], y), original, atol=1e-6)
     realigned = block.at[:, 0].set(block[::-1, 0])
-    assert not np.allclose(update.drift(state, realigned, y), original)
+    assert not np.allclose(update.drift(carry, realigned, y), original)
 
 
 def test_update_and_predictor_have_context_permutation_symmetry():
     update, predictor, y, u, pairs, draws = _fixture()
     initial = update.initial_state(len(y))
     order = jnp.array([2, 0, 3, 1])
-    state = advance_chunk(update, initial, draws[:2], y)
+    carry = advance_chunk(update, initial, draws[:2], y)
     permuted = advance_chunk(update, initial, draws[:2, :, order], y[order])
-    np.testing.assert_allclose(permuted.history, state.history[:, order], atol=2e-6)
-    context = predictor.encode_context(update.snapshot(state, y))
+    np.testing.assert_allclose(permuted.history, carry.history[:, order], atol=2e-6)
+    context = predictor.encode_context(update.snapshot(carry, y))
     permuted_context = predictor.encode_context(update.snapshot(permuted, y[order]))
     np.testing.assert_allclose(
         predictor.predict(permuted_context, u, pairs[:, order]),
@@ -166,11 +166,11 @@ def test_scored_rollout_matches_manual_prefixes_and_batches():
         steps = jnp.arange(1, 6)
         np.testing.assert_array_equal(steps[prefix_mask(steps, horizon)], expected)
 
-    state = update.initial_state(len(y))
+    carry = update.initial_state(len(y))
     scores = []
     for block in draws[:3]:
-        state, _ = update.step(state, block, y)
-        context = predictor.encode_context(update.snapshot(state, y))
+        carry, _ = update.step(carry, block, y)
+        context = predictor.encode_context(update.snapshot(carry, y))
         scores.append(loss(predictor.predict(context, u, pairs), targets))
 
     def score(sequence, horizon):

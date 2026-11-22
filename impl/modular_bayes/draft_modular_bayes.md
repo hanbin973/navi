@@ -47,7 +47,7 @@ proposal or integration rule can be added through those interfaces.
 The updater accepts one block of draws with shape `[K, N]`, where `N` is the
 number of context tokens and `K=1` represents a single draw. The caller
 owns draw generation and keys. Each draw is aligned to the same context rows
-as the observations and embeddings. The carry starts with zero embeddings,
+as the observations and embeddings. The `BayesCarry` starts with zero embeddings,
 a step count of zero, and any history required by the configured proposal.
 
 At update step `t`, starting at one:
