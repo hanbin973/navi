@@ -16,6 +16,7 @@ changing them.
 - `AGENTS.md` — repository-wide agent instructions and task routing.
 - `harness/environment.md` — uv environment and dependency guidance.
 - `harness/development.md` — development checks and verification expectations.
+- `harness/pattern/equinox.md` — Equinox abstract/final module design pattern.
 - `harness/cluster.md` — cluster rules, job prerequisites, and template routing.
 - `harness/slurm/bayes-update-spgpu.sbatch` — GPU job for the held-out
   Bayesian-update experiment.
