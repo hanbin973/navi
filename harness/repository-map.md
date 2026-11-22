@@ -38,6 +38,9 @@ changing them.
 - `navi/__init__.py` — public updater, predictor, and distribution imports.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
   and held-out extrapolation evaluation. Replay from the original commit.
+- `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322
+  using the modular API and plain recurrent context attention.
+  The runner is `python -m experiments.modular_bayes.run`.
 - `experiments/gp_experiment/` — historical fixed-context Gaussian episode simulation,
   Navi training, and paired oracle evaluation. Replay from the original commit.
 - `tests/test_bayes_update.py` — integration, history, prefix loss, symmetry, and gradients.

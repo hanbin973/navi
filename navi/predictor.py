@@ -75,7 +75,8 @@ class BarPredictor(AbstractPredictor):
     for loss and predictive summaries.
 
     Args:
-        state_width: Width of the committed context embeddings.
+        state_width: Width of the committed embeddings. Use zero for a
+            predictor with phenotype-only or exact-kernel context inputs.
         width: Hidden token width of the attention blocks.
         num_heads: Number of attention heads. Must divide width.
         query_depth: Number of query blocks. The context encoder uses
@@ -90,6 +91,9 @@ class BarPredictor(AbstractPredictor):
             the query-to-context pair bias projections.
         use_draw_count: Whether to add 1 / (1 + draw_count) to each context
             token's input features.
+        use_gram_bias: Whether to inject the context Gram matrix as an
+            additive context-attention bias when a Gram matrix is available.
+        exact_kernel: Require a supplied context kernel at encoding time.
     """
 
     context_projection: eqx.nn.Linear
@@ -102,7 +106,8 @@ class BarPredictor(AbstractPredictor):
     kernel_biases: tuple[eqx.nn.Linear, ...]
     head: eqx.nn.MLP
     distribution: FullSupportBarDistribution
-    gram_bias: eqx.nn.Linear
+    gram_bias: eqx.nn.Linear | None
+    exact_kernel: bool = eqx.field(static=True)
     out_size: int = eqx.field(static=True)
 
     def __init__(
@@ -119,8 +124,18 @@ class BarPredictor(AbstractPredictor):
         pre_norm: bool = False,
         kernel_bias_init_scale: float = 1.0,
         use_draw_count: bool = False,
+        use_gram_bias: bool = True,
+        exact_kernel: bool = False,
     ):
-        dimensions = (state_width, width, num_heads, query_depth)
+        dimensions = (width, num_heads, query_depth)
+        if (
+            type(state_width) is not int
+            or state_width < 0
+            or (exact_kernel and state_width)
+        ):
+            raise ValueError(
+                "state_width must be nonnegative and zero in exact-kernel mode"
+            )
         if hidden_size is not None:
             dimensions += (hidden_size,)
         if any(type(size) is not int or size < 1 for size in dimensions):
@@ -136,13 +151,17 @@ class BarPredictor(AbstractPredictor):
         self.out_size = self.distribution.num_bars
         self.state_width = state_width
         self.use_draw_count = use_draw_count
+        self.exact_kernel = exact_kernel
+        has_context_gram = bool(state_width or exact_kernel)
         base_key, _, gram_key = jax.random.split(key, 3)
-        self.gram_bias = eqx.nn.Linear(
-            1, num_heads, use_bias=False, key=gram_key, dtype=jnp.float32
+        self.gram_bias = (
+            eqx.nn.Linear(1, num_heads, use_bias=False, key=gram_key, dtype=jnp.float32)
+            if has_context_gram and use_gram_bias
+            else None
         )
         keys = iter(jax.random.split(base_key, 4 * query_depth + 3))
         self.context_projection = eqx.nn.Linear(
-            1 + state_width + 1 + int(use_draw_count),
+            1 + state_width + int(has_context_gram) + int(use_draw_count),
             width,
             dtype=jnp.float32,
             key=next(keys),
@@ -207,21 +226,34 @@ class BarPredictor(AbstractPredictor):
             )
         self.kernel_biases = tuple(kernel_biases)
 
-    def encode_context(self, snapshot: ContextSnapshot) -> Context:
-        """Prepare the snapshot for reuse across query batches."""
+    def encode_context(
+        self, snapshot: ContextSnapshot, *, gram: Array | None = None
+    ) -> Context:
+        """Prepare a snapshot, with an explicit context kernel in exact-kernel mode."""
         y, state, draw_count = snapshot
         if y.ndim != 2 or not y.shape[0]:
             raise ValueError("observations must contain a nonempty column")
         n = y.shape[0]
         y = _features(y, (n, 1), "observations")
         state = _features(state, (n, self.state_width), "embeddings")
-        gram = (state @ state.T) / self.state_width
-        features = [y, state, jnp.diag(gram)[:, None]]
+        features = [y, state]
+        if self.exact_kernel:
+            if gram is None:
+                raise ValueError("exact-kernel encoding requires a context kernel")
+            gram = _features(gram, (n, n), "context kernel")
+        elif gram is not None:
+            raise ValueError("a supplied context kernel requires exact-kernel mode")
+        elif self.state_width:
+            gram = (state @ state.T) / self.state_width
+        if gram is not None:
+            features.append(jnp.diag(gram)[:, None])
         if self.use_draw_count:
             count_feature = 1 / (1 + jnp.asarray(draw_count, dtype=y.dtype))
             features.append(jnp.broadcast_to(count_feature, (n, 1)))
-        bias = jax.vmap(jax.vmap(self.gram_bias))(gram[..., None])
-        bias = bias.transpose(2, 0, 1)[None]
+        bias = None
+        if self.gram_bias is not None and gram is not None:
+            bias = jax.vmap(jax.vmap(self.gram_bias))(gram[..., None])
+            bias = bias.transpose(2, 0, 1)[None]
         tokens = jax.vmap(self.context_projection)(jnp.concatenate(features, axis=1))
         return _encode_tokens(tokens, self.context_blocks, bias=bias)
 
