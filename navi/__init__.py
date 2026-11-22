@@ -11,10 +11,10 @@ from .bayes_update import (
     SecondMomentAttentionBias,
     TanhRunningMeanIntegrator,
     advance_chunk,
-    rollout_loss,
 )
 from .distribution import FullSupportBarDistribution
 from .predictor import AbstractPredictor, BarPredictor
+from .training import rollout_loss
 
 __all__ = [
     "AbstractAttentionBias",

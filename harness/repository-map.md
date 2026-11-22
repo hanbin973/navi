@@ -29,6 +29,7 @@ changing them.
 
 - `navi/bayes_update.py` — proposal and integrator interfaces, recurrent update, and draw rollouts.
 - `navi/predictor.py` — predictor interface and bar logits from recurrent context snapshots.
+- `navi/training.py` — draw-prefix selection and the training objective that composes updater and predictor.
 - `navi/blocks.py` — shared dense PFNs attention, MLP, and Transformer blocks.
 - `navi/helper.py` — abstract query kernel and dataset simulator interfaces,
   Gaussian reference helpers, and model-independent training episode assembly.

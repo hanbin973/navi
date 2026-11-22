@@ -12,6 +12,7 @@ snapshot or advance the updater before scoring again.
 | --- | --- | --- |
 | `navi/bayes_update.py` | Compose the proposal and integrator, initialize and advance the carry, expose the latest context embeddings, and scan draw chunks. | `BayesUpdate` and `advance_chunk` |
 | `navi/predictor.py` | Encode the latest context snapshot for reuse and decode query features and query-to-context pair features to marginal bar logits. | `BayesReadout` and the encoding and decoding paths in `Navi` |
+| `navi/training.py` | Select draw prefixes and compose the updater, predictor, and supervised loss. | `rollout_loss` and `prefix_mask` |
 | `navi/blocks.py` | Hold shared attention, MLP, and Transformer block implementations used by both components. | Shared primitives in `navi/model.py` |
 | `navi/distribution.py` | Interpret bar logits and compute loss and predictive summaries. | Existing distribution implementation |
 

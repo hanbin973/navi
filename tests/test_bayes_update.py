@@ -18,7 +18,7 @@ from navi import (
     advance_chunk,
     rollout_loss,
 )
-from navi.bayes_update import prefix_mask
+from navi.training import prefix_mask
 
 
 def _fixture():

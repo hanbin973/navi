@@ -45,6 +45,12 @@ second-moment example, and a separate draw-mean bias implementation.
 Step 4 records the historical references.
 Matched training and GPU evaluation remain unmeasured.
 
+## Training objective location
+
+`navi/training.py` owns `rollout_loss` and draw-prefix selection.
+`rollout_loss` combines the updater, predictor, query inputs, targets,
+and supplied loss function. It remains available as `navi.rollout_loss`.
+
 ## Original refactor record
 
 ## 1. Extract the shared blocks and establish reference checks
