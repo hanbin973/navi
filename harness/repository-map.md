@@ -18,8 +18,8 @@ changing them.
 - `harness/development.md` — development checks and verification expectations.
 - `harness/pattern/equinox.md` — Equinox abstract/final module design pattern.
 - `harness/cluster.md` — cluster rules, job prerequisites, and template routing.
-- `harness/slurm/python.sbatch` — common launcher for Python scripts and modules.
-- `harness/slurm/python-example.md` — mock Python workload and submission examples.
+- `harness/slurm/python.sbatch` — common launcher for Python scripts and modules, with optional GPU diagnostics.
+- `harness/slurm/python-example.md` — mock Python workload, scheduler options, and workload recipes.
 - `harness/slurm/bayes-update-spgpu.sbatch` — historical Bayesian-update GPU job.
 - `harness/slurm/` — workload-specific batch scripts and school reference example.
 - `harness/smoke.py` — small JAX/Equinox device execution check.
