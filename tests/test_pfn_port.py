@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from navi.model import _MLP, _Attention, _Block
+from navi.blocks import _MLP, _Attention, _Block
 
 FIXTURE = Path(__file__).parent / "fixtures" / "pfn_port.npz"
 

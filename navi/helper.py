@@ -1,14 +1,13 @@
 """Query features and joint trait simulation for Navi episodes."""
 
 from abc import abstractmethod
+from typing import NamedTuple
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
-
-from .model import Navi
 
 
 class QueryContextKernel(eqx.Module):
@@ -108,21 +107,27 @@ class GaussianDatasetSimulator(DatasetSimulator):
         return latent[queries], latent[context] + self.noise_std * noise
 
 
+class TrainingEpisode(NamedTuple):
+    """Aligned model inputs and targets for a sampled episode."""
+
+    observations: Array
+    query_features: Array
+    pair_features: Array
+    targets: Array
+
+
 def training_episode(
-    model: Navi,
     kernel: QueryContextKernel,
     simulator: DatasetSimulator,
     key: Array,
     context: Array,
     queries: Array,
-    population_ids: Array,
     *,
     cached_features: tuple[Array, Array] | None = None,
-) -> tuple[Array, Array]:
-    """Return predictions and targets for validated population selections.
+) -> TrainingEpisode:
+    """Sample a training episode using the selected context and queries.
 
-    Cached features must correspond to the same ordered selections. Only
-    selected context rows need valid Navi IDs in the population ID array.
+    Cached features must correspond to the same ordered selections.
     """
     targets, phenotypes = simulator.sample(key, context, queries)
     u, kappa = (
@@ -130,4 +135,4 @@ def training_episode(
         if cached_features is None
         else cached_features
     )
-    return model(phenotypes[:, None], population_ids[context], u, kappa), targets
+    return TrainingEpisode(phenotypes[:, None], u, kappa, targets)

@@ -13,7 +13,8 @@ git diff --check
 
 Ruff and pytest cover the Navi project. The pinned PFNs submodule has its own
 tooling. CPU parity tests read a checked-in fixture and require only the
-project uv environment.
+project uv environment. Run historical experiment jobs and their tests from
+the Git commits that contain the corresponding library APIs.
 
 For CPU and GPU execution checks, use `harness/slurm/cpu-debug.sbatch` and
 `harness/slurm/gpu-spgpu.sbatch` after resolving the prerequisites in

@@ -27,27 +27,32 @@ changing them.
 
 ## Application code and tests
 
-- `navi/bayes_update.py` — learned recurrent and pairwise second-moment updates with Navi density readouts.
-- `navi/model.py` — Equinox episode model and dense PFNs block primitives.
+- `navi/bayes_update.py` — proposal and integrator interfaces, recurrent update, and draw rollouts.
+- `navi/predictor.py` — predictor interface and bar logits from recurrent context snapshots.
+- `navi/training.py` — draw-prefix selection and the training objective that composes updater and predictor.
+- `navi/blocks.py` — shared dense PFNs attention, MLP, and Transformer blocks.
 - `navi/helper.py` — abstract query kernel and dataset simulator interfaces,
-  Gaussian reference helpers, and training episode assembly.
+  Gaussian reference helpers, and model-independent training episode assembly.
 - `navi/distribution.py` — fixed PFNs full-support bars, query loss, and
   predictive mean.
-- `navi/__init__.py` — public model and distribution imports.
-- `experiments/bayes_update/` — varying-kernel simulator, prefix training, and
-  held-out extrapolation evaluation.
-- `experiments/gp_experiment/` — fixed-context Gaussian episode simulation,
-  Navi training runner, and paired evaluation with oracle BLUP.
-- `tests/test_bayes_update.py` — rollout, symmetry, gradients, and draw checks.
-- `tests/test_gp_experiment.py` — episode, oracle, and runner checks.
+- `navi/__init__.py` — public updater, predictor, and distribution imports.
+- `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
+  and held-out extrapolation evaluation. Replay from the original commit.
+- `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322
+  using the modular API and plain recurrent context attention.
+  The runner is `python -m experiments.modular_bayes.run`.
+- `experiments/gp_experiment/` — historical fixed-context Gaussian episode simulation,
+  Navi training, and paired oracle evaluation. Replay from the original commit.
+- `tests/test_bayes_update.py` — integration, history, prefix loss, symmetry, and gradients.
 - `tests/test_pfn_port.py` — primitive initialization and pinned PFNs parity.
 - `tests/test_navi_helper.py` — kernel alignment, joint simulation, BLUP
   reference, and training episode checks.
-- `tests/test_navi_model.py` — episode validation, context reuse, query
-  semantics, batching, bar-distribution loss, and gradients.
+- `tests/test_navi_model.py` — predictor context reuse, input validation, and bar-distribution checks.
 - `tests/fixtures/` — Torch-free parity data and its CPU PyTorch generator.
 
 ## Design notes
+
+- `impl/modular_bayes/` — modular updater and predictor design and implementation record.
 
 - `impl/bayes_update/impl_bayes_update.md` — approximate Bayesian update
   implementation and experiment plan.

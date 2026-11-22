@@ -1,149 +1,157 @@
-"""State-conditioned Navi readout and bounded Bayesian update."""
+"""Compose a joint draw-block proposal and a block integrator."""
 
-from typing import final
+from abc import abstractmethod
+from typing import NamedTuple, final
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax import Array
 
-from .distribution import FullSupportBarDistribution
-from .model import _MLP, Navi, _Block, _decode_tokens, _encode_tokens, _features
+from .blocks import _Block, _features
 
 
-@final
-class BayesReadout(eqx.Module):
-    """Navi density readout with recurrent, exact-kernel or phenotype inputs."""
+class BayesCarry(NamedTuple):
+    """Committed context history and absolute rollout counters.
 
-    context_projection: eqx.nn.Linear
-    state_width: int = eqx.field(static=True)
-    use_draw_count: bool = eqx.field(static=True)
-    context_blocks: tuple[_Block, ...]
-    query_projection: eqx.nn.Linear
-    query_blocks: tuple[_Block, ...]
-    pair_encoders: tuple[_MLP, ...]
-    kernel_biases: tuple[eqx.nn.Linear, ...]
-    head: eqx.nn.MLP
-    distribution: FullSupportBarDistribution
-    gram_bias: eqx.nn.Linear | None
-    out_size: int = eqx.field(static=True)
+    Attributes:
+        history: Embeddings [H, N, D] for H history slots, N context rows,
+            and embedding width D. The newest snapshot is in the last slot.
+        valid: Boolean mask [H] marking initialized history slots.
+        step: Scalar count of committed draw blocks.
+        draw_count: Scalar count of individual joint draws consumed.
+    """
 
-    def __init__(
-        self,
-        *,
-        state_width=0,
-        exact_kernel=False,
-        use_draw_count=False,
-        key,
-        **settings,
-    ):
-        if use_draw_count and not exact_kernel:
-            raise ValueError("draw-count conditioning requires a supplied kernel")
-        if exact_kernel and settings["query_depth"] < 2:
-            raise ValueError(
-                "exact-kernel conditioning requires query depth of at least 2"
-            )
-        if state_width < 0 or (state_width and exact_kernel):
-            raise ValueError("state and exact-kernel conditioning are separate modes")
-        base_key, _, gram_key = jax.random.split(key, 3)
-        base = Navi(
-            context_size=1
-            + int(bool(exact_kernel or state_width))
-            + int(use_draw_count)
-            + state_width,
-            query_size=1,
-            pair_size=1,
-            num_ids=1,
-            key=base_key,
-            **settings,
-        )
-        self.context_projection = base.context_projection
-        self.context_blocks = base.context_blocks
-        self.query_projection = base.query_projection
-        self.query_blocks = base.query_blocks
-        self.pair_encoders = base.pair_encoders
-        self.kernel_biases = base.kernel_biases
-        self.head = base.head
-        self.distribution = base.distribution
-        self.out_size = base.out_size
-        self.state_width = state_width
-        self.use_draw_count = use_draw_count
-        self.gram_bias = (
-            eqx.nn.Linear(
-                1,
-                settings["num_heads"],
-                use_bias=False,
-                key=gram_key,
-                dtype=jnp.float32,
-            )
-            if exact_kernel or state_width
-            else None
-        )
+    history: Array
+    valid: Array
+    step: Array
+    draw_count: Array
 
-    def encode_context(self, y, *, state=None, step=None, gram=None, draw_count=None):
-        """Encode the context for reuse across query batches.
 
-        The recurrent state supplies token features and a Gram matrix.
-        The step argument is accepted for compatibility with rollout callers.
-        """
-        if y.ndim != 2 or not y.shape[0]:
-            raise ValueError("y must contain a nonempty column of context phenotypes")
-        n = y.shape[0]
-        y = _features(y, (n, 1), "y")
-        bias = None
-        if self.gram_bias is not None:
-            if self.state_width:
-                state = _features(state, (n, self.state_width), "state")
-                gram = (state @ state.T) / self.state_width
-                y = jnp.concatenate((y, state), axis=1)
-            else:
-                gram = _features(gram, (n, n), "context kernel")
-            y = jnp.concatenate((y, jnp.diag(gram)[:, None]), axis=1)
-            bias = jax.vmap(jax.vmap(self.gram_bias))(gram[..., None])
-            bias = bias.transpose(2, 0, 1)[None]
-        if self.use_draw_count:
-            count_feature = 1 / (1 + jnp.asarray(draw_count, dtype=y.dtype))
-            y = jnp.concatenate((y, jnp.broadcast_to(count_feature, (n, 1))), axis=1)
-        tokens = jax.vmap(self.context_projection)(y)
-        return _encode_tokens(tokens, self.context_blocks, bias=bias)
+class ContextSnapshot(NamedTuple):
+    """Aligned predictor inputs at one rollout prefix.
 
-    def decode_queries(self, context, u, pair_features):
-        """Score independent query marginals from a context encoding."""
-        u = _features(u, (u.shape[0], 1), "query features")
-        n = context[0].shape[0]
-        pair_features = _features(pair_features, (u.shape[0], n, 1), "pair features")
-        return _decode_tokens(self, context, u, pair_features)
+    Attributes:
+        observations: Context observations [N, 1].
+        embeddings: Latest committed context embeddings [N, D].
+        draw_count: Scalar count of joint draws consumed at this prefix.
+    """
 
+    observations: Array
+    embeddings: Array
+    draw_count: Array
+
+
+class AbstractProposal(eqx.Module):
+    """Produce one raw candidate per draw block from committed history.
+
+    Attributes:
+        state_width: Embedding width D shared by the history and candidate.
+        history_capacity: Number H of fixed, right-aligned history slots.
+    """
+
+    state_width: eqx.AbstractVar[int]
+    history_capacity: eqx.AbstractVar[int]
+
+    @abstractmethod
     def __call__(
-        self, y, u, pair_features, *, state=None, step=None, gram=None, draw_count=None
-    ):
-        context = self.encode_context(
-            y, state=state, step=step, gram=gram, draw_count=draw_count
-        )
-        return self.decode_queries(context, u, pair_features)
+        self, history: Array, valid: Array, draws: Array, observations: Array
+    ) -> Array:
+        """Map history [H, N, D] and aligned draws [N, K] to [N, D].
 
-    def read_state(self, y, u, pair_features, state, step, *, draw_count=None):
-        """Read a recurrent feature matrix or a pairwise second moment."""
-        if self.state_width:
-            return self(y, u, pair_features, state=state, step=step)
-        return self(y, u, pair_features, gram=state, draw_count=draw_count)
+        Each column is a joint draw. Reordering columns together must
+        preserve the proposal up to floating-point roundoff.
+        """
+        raise NotImplementedError
+
+    def __check_init__(self):
+        for size in (self.state_width, self.history_capacity):
+            if type(size) is not int or size < 1:
+                raise ValueError(
+                    "state width and history capacity must be positive integers"
+                )
+
+
+class AbstractAttentionBias(eqx.Module):
+    """Produce additive token-attention logits from aligned draws.
+
+    Implementations receive draws [N, K] and return a bias tensor
+    [1, heads, N, N] aligned with the mixer's query and key token axes.
+    Reordering draw columns together should preserve the bias up to roundoff.
+    """
+
+    @abstractmethod
+    def __call__(self, draws: Array) -> Array:
+        """Map a draw block [N, K] to bias [1, heads, N, N]."""
+        raise NotImplementedError
 
 
 @final
-class BayesUpdate(eqx.Module):
-    """Equivariant running mean of block-averaged bounded recurrent proposals."""
+class SecondMomentAttentionBias(AbstractAttentionBias):
+    """Map the empirical second moment to per-head attention logits.
 
+    Computes draws @ draws.T / K and applies a shared linear projection
+    to every entry of the resulting context-by-context matrix.
+
+    Args:
+        heads: Number of attention heads to produce biases for.
+        key: JAX PRNG key for initializing the projection.
+    """
+
+    projection: eqx.nn.Linear
+
+    def __init__(self, heads: int, *, key: Array):
+        self.projection = eqx.nn.Linear(
+            1, heads, use_bias=False, dtype=jnp.float32, key=key
+        )
+
+    def __call__(self, draws: Array) -> Array:
+        moment = (draws @ draws.T) / draws.shape[1]
+        bias = jax.vmap(jax.vmap(self.projection))(moment[..., None])
+        return bias.transpose(2, 0, 1)[None]
+
+
+@final
+class AttentionProposal(AbstractProposal):
+    """Propose one candidate from the latest snapshot and a joint draw block.
+
+    Token attention mixes the latest embeddings, observations, and per-token
+    mean squared draws. The output projection returns a raw candidate [N, D].
+
+    Args:
+        state_width: Context embedding and candidate width D.
+        width: Hidden token width of the attention mixer.
+        heads: Number of token-attention heads. Must divide width.
+        pre_norm: Whether to normalize before attention and MLP operations.
+        key: JAX PRNG key for initializing the proposal.
+        attention_bias: Optional module producing additive logits for the
+            mixer's heads and context rows from the same draw block.
+    """
+
+    state_width: int = eqx.field(static=True)
+    history_capacity: int = eqx.field(static=True, init=False, default=1)
     input_projection: eqx.nn.Linear
+    attention_bias: AbstractAttentionBias | None
     mixer: _Block
     output_projection: eqx.nn.Linear
 
-    def __init__(self, state_width, width, heads, *, pre_norm, key):
-        if min(state_width, width, heads) < 1 or width % heads:
-            raise ValueError("invalid update dimensions")
+    def __init__(
+        self, state_width, width, heads, *, pre_norm, key, attention_bias=None
+    ):
+        if any(
+            type(size) is not int or size < 1 for size in (state_width, width, heads)
+        ):
+            raise ValueError("proposal dimensions must be positive integers")
+        if width % heads:
+            raise ValueError("width must be divisible by heads")
+        if not isinstance(pre_norm, bool):
+            raise TypeError("pre_norm must be a bool")
+        self.state_width = state_width
         first, middle, last = jax.random.split(key, 3)
         self.input_projection = eqx.nn.Linear(
             state_width + 2, width, key=first, dtype=jnp.float32
         )
+        self.attention_bias = attention_bias
         self.mixer = _Block(
             width, heads, 2 * width, zero_init=False, pre_norm=pre_norm, key=middle
         )
@@ -151,84 +159,121 @@ class BayesUpdate(eqx.Module):
             width, state_width, key=last, dtype=jnp.float32
         )
 
-    def initial_state(self, n):
-        return jnp.zeros((n, self.output_projection.out_features), dtype=jnp.float32)
+    def __call__(self, history, valid, draws, observations):
+        draw_energy = jnp.mean(jnp.square(draws), axis=1, keepdims=True)
+        inputs = jnp.concatenate((history[-1], draw_energy, observations), axis=1)
+        tokens = jax.vmap(self.input_projection)(inputs)
+        bias = None if self.attention_bias is None else self.attention_bias(draws)
+        hidden = self.mixer(tokens, bias=bias)
+        return jax.vmap(self.output_projection)(hidden)
 
-    def drift(self, state, draw, y):
-        block = jnp.atleast_2d(draw)
-        proposals = jax.vmap(self._proposal, in_axes=(None, 0, None))(state, block, y)
-        return proposals.mean(axis=0) - state
 
-    def _proposal(self, state, draw, y):
-        inputs = jnp.concatenate((state, draw[:, None], y), axis=1)
-        proposal = jax.vmap(self.output_projection)(
-            self.mixer(jax.vmap(self.input_projection)(inputs))
-        )
-        return jnp.tanh(proposal)
+class AbstractIntegrator(eqx.Module):
+    """Turn one raw block candidate into a committed embedding snapshot.
 
-    def step(self, state, draw, y, step):
-        drift = self.drift(state, draw, y)
-        return state + drift / jnp.float32(step), drift
+    Implementations receive the latest embeddings and candidate, both [N, D],
+    and a one-based scalar step. They return the next embeddings and drift
+    with the same shape.
+    """
+
+    @abstractmethod
+    def __call__(
+        self, latest: Array, candidate: Array, step: Array
+    ) -> tuple[Array, Array]:
+        """Return the committed embeddings and drift, both shaped [N, D]."""
+        raise NotImplementedError
 
 
 @final
-class PairwiseUpdate(eqx.Module):
-    """Running uncentered second moment of zero-mean Gaussian draws."""
+class TanhRunningMeanIntegrator(AbstractIntegrator):
+    """Integrate a block candidate with a bounded running-mean update.
 
-    def initial_state(self, n):
-        return jnp.zeros((n, n), dtype=jnp.float32)
+    Computes drift = tanh(candidate) - latest and returns
+    (latest + drift / step, drift). The integrator has no parameters.
+    """
 
-    def drift(self, state, draw, y):
+    def __call__(self, latest, candidate, step):
+        drift = jnp.tanh(candidate) - latest
+        return latest + drift / jnp.asarray(step, dtype=latest.dtype), drift
+
+
+@final
+class BayesUpdate(eqx.Module):
+    """Consume draw blocks and manage the committed context history.
+
+    Each step calls the proposal once, integrates its candidate, and commits
+    one snapshot. The carry can resume a rollout, and snapshot() exposes the
+    latest embeddings and draw count to the predictor.
+
+    Args:
+        proposal: Module mapping committed history and a joint draw block
+            to one raw candidate. Its dimensions determine the carry shape.
+        integrator: Module mapping the raw candidate and latest embeddings
+            to the committed embeddings and drift.
+    """
+
+    proposal: AbstractProposal
+    integrator: AbstractIntegrator
+
+    def initial_state(self, n: int) -> BayesCarry:
+        if n < 1:
+            raise ValueError("at least one context token is required")
+        capacity = self.proposal.history_capacity
+        return BayesCarry(
+            jnp.zeros((capacity, n, self.proposal.state_width), dtype=jnp.float32),
+            jnp.arange(capacity) == capacity - 1,
+            jnp.int32(0),
+            jnp.int32(0),
+        )
+
+    def snapshot(self, carry: BayesCarry, observations: Array) -> ContextSnapshot:
+        return ContextSnapshot(observations, carry.history[-1], carry.draw_count)
+
+    def _integrate(self, carry, block, observations):
+        n = carry.history.shape[1]
+        if block.ndim != 2 or not block.shape[0]:
+            raise ValueError("draws must be a nonempty block")
+        block = _features(block, (block.shape[0], n), "draws")
+        observations = _features(observations, (n, 1), "observations")
+        candidate = self.proposal(carry.history, carry.valid, block.T, observations)
+        return self.integrator(carry.history[-1], candidate, carry.step + 1)
+
+    def drift(self, carry: BayesCarry, draw: Array, observations: Array) -> Array:
+        """Evaluate drift against a fixed carry."""
+        return self._integrate(carry, jnp.atleast_2d(draw), observations)[1]
+
+    def step(
+        self, carry: BayesCarry, draw: Array, observations: Array
+    ) -> tuple[BayesCarry, Array]:
+        """Consume one draw [N] or block [K, N] and commit one snapshot."""
         block = jnp.atleast_2d(draw)
-        return (block.T @ block) / block.shape[0] - state
-
-    def step(self, state, draw, y, step):
-        drift = self.drift(state, draw, y)
-        return state + drift / jnp.float32(step), drift
-
-
-def prefix_mask(steps, horizon):
-    """Select the powers of two and the terminal prefix."""
-    return (steps <= horizon) & (((steps & (steps - 1)) == 0) | (steps == horizon))
+        latest, drift = self._integrate(carry, block, observations)
+        history = jnp.concatenate((carry.history[1:], latest[None]), axis=0)
+        valid = jnp.concatenate((carry.valid[1:], jnp.ones((1,), dtype=bool)))
+        return BayesCarry(
+            history, valid, carry.step + 1, carry.draw_count + block.shape[0]
+        ), drift
 
 
-def rollout_loss(
-    update, readout, y, u, pairs, targets, draws, horizon, *, min_prefix=1
-):
-    """Average marginal PFN log loss over the selected rollout steps."""
-    steps = jnp.arange(1, draws.shape[0] + 1, dtype=jnp.int32)
-    selected = prefix_mask(steps, horizon) & (steps >= min_prefix)
-    block_size = draws.shape[1] if draws.ndim == 3 else 1
+def advance_chunk(update, carry: BayesCarry, draws: Array, observations: Array):
+    """Advance the updater through a chunk of draws.
 
-    def advance(state, inputs):
-        draw, step, score = inputs
-        state = jax.lax.cond(
-            step <= horizon, lambda: update.step(state, draw, y, step)[0], lambda: state
-        )
-        nll = jax.lax.cond(
-            score,
-            lambda: readout.distribution.loss(
-                readout.read_state(
-                    y, u, pairs, state, step, draw_count=step * block_size
-                ),
-                targets,
-            ),
-            lambda: jnp.float32(0),
-        )
-        return state, nll
+    Args:
+        update: Bayesian updater that commits one snapshot per step.
+        carry: Initial or previously advanced carry for the same context rows.
+        draws: Sequence of T steps over N context rows, shaped [T, N] for
+            single draws or [T, K, N] for blocks of K joint draws.
+        observations: Context observations [N, 1] aligned with the draws and
+            carry history.
 
-    _, scores = jax.lax.scan(
-        advance, update.initial_state(y.shape[0]), (draws, steps, selected)
-    )
-    return jnp.sum(scores) / jnp.sum(selected)
-
-
-def advance_chunk(update, state: Array, step, draws: Array, y: Array):
-    """Consume a chunk and return state and the last absolute step."""
+    Returns:
+        Final BayesCarry with updated history and validity mask. The step
+        count advances by T and the draw count advances by T * K, with
+        K = 1 for single draws. An empty chunk returns the input carry.
+    """
 
     def advance(carry, draw):
-        current, index = carry
-        current, _ = update.step(current, draw, y, index + 1)
-        return (current, index + 1), None
+        current, _ = update.step(carry, draw, observations)
+        return current, None
 
-    return jax.lax.scan(advance, (state, step), draws)[0]
+    return jax.lax.scan(advance, carry, draws)[0]

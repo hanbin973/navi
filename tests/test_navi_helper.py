@@ -4,7 +4,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from navi import Navi
 from navi.helper import (
     GaussianDatasetSimulator,
     GramQueryContextKernel,
@@ -97,27 +96,15 @@ def test_training_episode(reference, query_rows):
     kernel, simulator, _ = reference
     context = jnp.array([2, 0])
     queries = jnp.array(query_rows)
-    ids = jnp.array([3, 2, 0, 4, -1])
-    model = Navi(
-        context_size=1,
-        query_size=2,
-        pair_size=2,
-        bin_edges=[-2, 0, 2],
-        num_ids=5,
-        width=4,
-        num_heads=2,
-        query_depth=1,
-        zero_init=False,
-        key=jax.random.key(21),
-    )
     key = jax.random.key(22)
     features = kernel.features(context, queries)
-    f, y = simulator.sample(key, context, queries)
-    expected = model(y[:, None], ids[context], *features)
+    targets, observations = simulator.sample(key, context, queries)
     compiled = eqx.filter_jit(training_episode)
     for cache in (None, features):
-        actual, targets = compiled(
-            model, kernel, simulator, key, context, queries, ids, cached_features=cache
+        actual = compiled(
+            kernel, simulator, key, context, queries, cached_features=cache
         )
-        np.testing.assert_allclose(actual, expected, atol=1e-6)
-        np.testing.assert_allclose(targets, f, atol=1e-6)
+        for value, expected in zip(
+            actual, (observations[:, None], *features, targets), strict=True
+        ):
+            np.testing.assert_allclose(value, expected, atol=1e-6)
