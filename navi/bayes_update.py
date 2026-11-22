@@ -191,7 +191,21 @@ class BayesUpdate(eqx.Module):
 
 
 def advance_chunk(update, carry: BayesCarry, draws: Array, observations: Array):
-    """Consume a sequence of single draws [T, N] or blocks [T, K, N]."""
+    """Advance the updater through a chunk of draws.
+
+    Args:
+        update: Bayesian updater that commits one snapshot per step.
+        carry: Initial or previously advanced carry for the same context rows.
+        draws: Sequence of T steps over N context rows, shaped [T, N] for
+            single draws or [T, K, N] for blocks of K joint draws.
+        observations: Context observations [N, 1] aligned with the draws and
+            carry history.
+
+    Returns:
+        Final BayesCarry with updated history and validity mask. The step
+        count advances by T and the draw count advances by T * K, with
+        K = 1 for single draws. An empty chunk returns the input carry.
+    """
 
     def advance(carry, draw):
         current, _ = update.step(carry, draw, observations)
