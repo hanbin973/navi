@@ -282,7 +282,7 @@ def run(args):
     metadata = vars(args) | {
         "output_dir": str(args.output_dir),
         "reference_run": "modular-bayes-66615357",
-        "checkpoint_version": 1,
+        "checkpoint_version": 2,
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "pre_norm": True,
         "bin_edges": edges,

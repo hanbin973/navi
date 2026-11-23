@@ -434,6 +434,8 @@ def test_late_loss_differentiates_through_early_draw_and_both_networks():
         proposal_grad.pooling.scorer,
         proposal_grad.pooling.prefix_scorer,
         proposal_grad.layers,
+        grads[1].encoder,
+        grads[1].decoder,
     )
     for tree in grads:
         leaves = jax.tree.leaves(tree)

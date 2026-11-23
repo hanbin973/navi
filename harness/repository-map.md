@@ -28,7 +28,8 @@ changing them.
 
 - `navi/bayes_update.py` — axial proposal, prefix-conditioned Deep Sets draw
   pooling, proposal and integrator interfaces, and recurrent rollouts.
-- `navi/predictor.py` — predictor interface and bar logits from recurrent context snapshots.
+- `navi/predictor.py` — context encoder and query decoder interfaces, readout
+  components, and their composition into the bar predictor.
 - `navi/training.py` — draw-prefix selection and the training objective that composes updater and predictor.
 - `navi/blocks.py` — shared dense PFNs attention, MLP, and Transformer blocks.
 - `navi/helper.py` — abstract query kernel and dataset simulator interfaces,
@@ -53,6 +54,7 @@ changing them.
 
 ## Design notes
 
+- `impl/modular_readout/` — readout component design and implementation plan.
 - `impl/attention_update/` — axial proposal design, implementation plan, and
   verification record.
 - `impl/modular_bayes/` — modular updater and predictor design and implementation record.

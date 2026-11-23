@@ -4,7 +4,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from navi import BarPredictor, ContextSnapshot, FullSupportBarDistribution
+from navi import (
+    AlternatingQueryDecoder,
+    BarPredictor,
+    ContextSnapshot,
+    FullSupportBarDistribution,
+    LastContextQueryDecoder,
+    NoContextEncoder,
+)
 
 
 def close(actual, expected):
@@ -55,7 +62,7 @@ def test_draw_count_conditioning_changes_context_encoding():
     snapshot = ContextSnapshot(jnp.zeros((2, 1)), jnp.zeros((2, 2)), jnp.int32(1))
     initial = predictor.encode_context(snapshot)[0]
     later = predictor.encode_context(snapshot._replace(draw_count=jnp.int32(3)))[0]
-    count_weight = predictor.context_projection.weight[:, -1]
+    count_weight = predictor.encoder.context_projection.weight[:, -1]
     close(initial - later, jnp.broadcast_to(count_weight / 4, initial.shape))
 
 
@@ -76,11 +83,98 @@ def test_context_diagonal_does_not_build_full_gram(use_gram_bias, query_depth):
     snapshot = ContextSnapshot(observations, state, jnp.int32(0))
     diagonal = jnp.diag(state @ state.T)[:, None] / state.shape[1]
     features = jnp.concatenate((observations, state, diagonal), axis=1)
-    expected = jax.vmap(predictor.context_projection)(features)
+    expected = jax.vmap(predictor.encoder.context_projection)(features)
     close(eqx.filter_jit(predictor.encode_context)(snapshot)[0], expected)
 
     jaxpr = jax.make_jaxpr(predictor.encode_context)(snapshot).jaxpr
     assert all(var.aval.shape != (n, n) for eqn in jaxpr.eqns for var in eqn.outvars)
+
+
+@pytest.mark.parametrize(
+    ("width", "query_depth", "out_size", "message"),
+    [
+        (6, 1, 2, "context widths"),
+        (4, 2, 2, "context state counts"),
+        (4, 1, 3, "number of bars"),
+    ],
+)
+def test_bar_predictor_rejects_incompatible_components(
+    width, query_depth, out_size, message
+):
+    decoder = AlternatingQueryDecoder(
+        width=width,
+        num_heads=2,
+        query_depth=query_depth,
+        out_size=out_size,
+        key=jax.random.key(21),
+    )
+    with pytest.raises(ValueError, match=message):
+        BarPredictor.from_components(NoContextEncoder(4), decoder, bin_edges=(-2, 0, 2))
+
+
+def test_no_context_encoder_passes_embeddings_to_either_decoder():
+    encoder = NoContextEncoder(4)
+    embeddings = jnp.arange(12, dtype=jnp.float32).reshape(3, 4) / 8
+    snapshot = ContextSnapshot(jnp.ones((3, 1)), embeddings, jnp.int32(2))
+    encode = eqx.filter_jit(encoder)
+    (encoded,) = encode(
+        snapshot._replace(observations=-snapshot.observations, draw_count=jnp.int32(8))
+    )
+    np.testing.assert_array_equal(encoded, embeddings)
+    assert encoder(snapshot)[0] is embeddings
+    with pytest.raises(ValueError, match="context kernel"):
+        encoder(snapshot, gram=jnp.eye(3))
+    with pytest.raises(ValueError, match="context states must have shape"):
+        encoder(snapshot._replace(embeddings=embeddings[:, :2]))
+    with pytest.raises(TypeError, match="dtype float32"):
+        encoder(snapshot._replace(embeddings=embeddings.astype(jnp.int32)))
+
+    options = {
+        "width": 4,
+        "num_heads": 2,
+        "out_size": 2,
+        "zero_init": False,
+        "key": jax.random.key(22),
+    }
+    queries = jnp.array([[0.5], [-0.5]])
+    pairs = jnp.ones((2, 3, 1))
+    for decoder in (
+        AlternatingQueryDecoder(query_depth=1, **options),
+        LastContextQueryDecoder(query_depth=2, num_context_states=1, **options),
+    ):
+        predictor = BarPredictor.from_components(encoder, decoder, bin_edges=(-2, 0, 2))
+        logits = eqx.filter_jit(predictor.predict)(
+            predictor.encode_context(snapshot), queries, pairs
+        )
+        assert logits.shape == (2, 2) and logits.dtype == jnp.float32
+        assert jnp.isfinite(logits).all()
+
+
+def test_last_context_decoder_reads_only_final_state_at_each_stage():
+    decoder = LastContextQueryDecoder(
+        width=4,
+        num_heads=2,
+        out_size=2,
+        query_depth=2,
+        num_context_states=3,
+        pre_norm=True,
+        zero_init=False,
+        key=jax.random.key(23),
+    )
+    final = jnp.sin(jnp.arange(12, dtype=jnp.float32).reshape(3, 4))
+    context = (jnp.zeros_like(final), jnp.ones_like(final), final)
+    queries = jnp.array([[0.5]])
+    pairs = jnp.array([[[0.0], [-1.0], [1.0]]])
+    decode = eqx.filter_jit(decoder)
+    logits = decode(context, queries, pairs)
+    close(decode((final * 2, final * 3, final), queries, pairs), logits)
+    close(decoder.decoder((final, final), queries, pairs), logits)
+    assert not np.allclose(decode((*context[:2], -final), queries, pairs), logits)
+
+    with pytest.raises(ValueError, match="3 states"):
+        decoder(context[1:], queries, pairs)
+    with pytest.raises(ValueError, match="context states must have shape"):
+        decoder((final[:-1], *context[1:]), queries, pairs)
 
 
 def test_full_support_bar_density_mean_and_gradient():
