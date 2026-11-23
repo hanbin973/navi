@@ -159,3 +159,58 @@ def test_legacy_runner_accepts_no_dataset(tmp_path):
     assert np.isfinite(
         np.loadtxt(output / "training.csv", delimiter=",", skiprows=1)
     ).all()
+
+
+def test_structured_online_runner_uses_no_dataset_or_legacy_simulation(
+    tmp_path, monkeypatch
+):
+    def forbid(*args, **kwargs):
+        raise AssertionError(
+            "structured online mode reached a dataset or legacy sampler"
+        )
+
+    for name in (
+        "SimulationDataset",
+        "sample_episode",
+        "prior_bin_edges",
+        "_step_draws",
+    ):
+        monkeypatch.setattr(runner, name, forbid)
+
+    output = tmp_path / "online-run"
+    defaults = runner.parse_args(["--structured", "--output-dir", str(output)])
+    assert (defaults.n, defaults.features, defaults.context_count) == (512, 128, 504)
+    runner.main(
+        [
+            *_args(output),
+            "--structured",
+            "--n",
+            "8",
+            "--m",
+            "3",
+            "--alpha",
+            "1.5",
+            "--queries",
+            "2",
+            "--k",
+            "2",
+            "--batch-size",
+            "2",
+            "--eval-multiplier",
+            "2",
+            "--chunk-size",
+            "1",
+        ]
+    )
+    metadata = json.loads((output / "run.json").read_text())
+    assert (
+        metadata["population_size"],
+        metadata["spectral_rank"],
+        metadata["alpha"],
+    ) == (8, 3, 1.5)
+    assert metadata["training_episodes"] == 6
+    training = np.loadtxt(output / "training.csv", delimiter=",", skiprows=1)
+    episodes = np.loadtxt(output / "episodes.csv", delimiter=",", skiprows=1)
+    assert training.shape == (3, 2)
+    np.testing.assert_array_equal(episodes[:, 1:3], [[1, 2], [2, 4], [4, 8]])
+    assert np.isfinite(training).all() and np.isfinite(episodes).all()

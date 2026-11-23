@@ -5,9 +5,11 @@ import csv
 import json
 import logging
 import os
+from functools import partial
 from itertools import islice
 from pathlib import Path
 from time import perf_counter
+from typing import NamedTuple
 
 import equinox as eqx
 import jax
@@ -36,13 +38,56 @@ from navi import (
     rollout_loss,
 )
 from navi.helper import TrainingEpisode
+from navi.simulation import (
+    kernel_features,
+    power_law_eigenvalues,
+    sample_updater_draws,
+    selected_factor,
+    simulate_trait,
+)
 from navi.simulation_data import SimulationDataset
 
 logger = logging.getLogger(__name__)
 advance_stored_chunk = eqx.filter_jit(advance_chunk)
 
 
-def make_train_chunk(optimizer, args):
+class StructuredEpisode(NamedTuple):
+    inputs: TrainingEpisode
+    context_factor: jax.Array
+    draw_key: jax.Array
+
+
+@partial(jax.jit, static_argnames=("n", "c", "q"))
+def sample_structured_episode(key, spectrum, *, n, c, q):
+    trait_key, draw_key = jax.random.split(key)
+    trait = simulate_trait(trait_key, spectrum, n=n, c=c, q=q)
+    context = selected_factor(trait.factors, trait.context)
+    queries = selected_factor(trait.factors, trait.queries)
+    features = kernel_features(context, queries)
+    valid_basis = jnp.all(jnp.isfinite(trait.qr_diagonal) & (trait.qr_diagonal != 0))
+    targets = jnp.where(valid_basis, trait.targets, jnp.nan)
+    inputs = TrainingEpisode(trait.observations[:, None], *features, targets)
+    return StructuredEpisode(inputs, context, draw_key)
+
+
+@partial(jax.jit, static_argnames=("length", "k"))
+def structured_draws(context_factor, key, first, *, length, k):
+    indices = first * k + jnp.arange(length * k, dtype=jnp.uint32)
+    return sample_updater_draws(context_factor, key, indices).reshape(
+        length, k, context_factor.shape[0]
+    )
+
+
+@partial(jax.jit, static_argnames=("n", "q"))
+def structured_calibration_targets(key, spectrum, *, n, q):
+    keys = jax.random.split(key, 128)
+    return jax.lax.map(
+        lambda sample_key: simulate_trait(sample_key, spectrum, n=n, c=0, q=q).targets,
+        keys,
+    )
+
+
+def make_train_chunk(optimizer, args, spectrum=None):
     def train_step(models, opt_state, key, stored_batch):
         episode_key, horizon_key = jax.random.split(key)
         horizon = jax.random.randint(horizon_key, (), 2, args.t_max + 1)
@@ -79,7 +124,41 @@ def make_train_chunk(optimizer, args):
                 models, stored_batch.episodes, stored_batch.draws
             ).mean()
 
-        loss, grads = eqx.filter_value_and_grad(objective)(models)
+        if spectrum is None:
+            loss, grads = eqx.filter_value_and_grad(objective)(models)
+        else:
+
+            def structured_loss(models, key):
+                episode = sample_structured_episode(
+                    key, spectrum, n=args.n, c=args.context_count, q=args.queries
+                )
+                draws = structured_draws(
+                    episode.context_factor,
+                    episode.draw_key,
+                    jnp.uint32(0),
+                    length=args.t_max,
+                    k=args.k,
+                )
+                return episode_loss(models, episode.inputs, draws)
+
+            loss_and_grad = eqx.filter_value_and_grad(structured_loss)
+
+            def accumulate(carry, key):
+                total_loss, total_grads = carry
+                loss, grads = loss_and_grad(models, key)
+                return (
+                    total_loss + loss,
+                    jax.tree.map(jnp.add, total_grads, grads),
+                ), None
+
+            # Accumulate on-device so attention activations fit one episode at a time.
+            zeros = jax.tree.map(
+                jnp.zeros_like, eqx.filter(models, eqx.is_inexact_array)
+            )
+            keys = jax.random.split(episode_key, args.batch_size)
+            (loss, grads), _ = jax.lax.scan(accumulate, (jnp.float32(0), zeros), keys)
+            loss /= args.batch_size
+            grads = jax.tree.map(lambda grad: grad / args.batch_size, grads)
         updates, opt_state = optimizer.update(grads, opt_state)
         models = eqx.apply_updates(models, updates)
         leaves = jax.tree.leaves(eqx.filter((grads, models, opt_state), eqx.is_array))
@@ -122,14 +201,25 @@ def make_train_chunk(optimizer, args):
     return train_chunk
 
 
-def evaluate(models, test_key, args, stored_split=None):
+def evaluate(models, test_key, args, stored_split=None, spectrum=None):
     update, predictor = models
-    if stored_split is None:
+    if stored_split is None and spectrum is None:
         sample = jax.jit(sample_episode, static_argnums=(1, 2, 3))
     rows = []
     grid = checkpoints(args.t_max, args.eval_multiplier)
     for episode_index in range(args.test_episodes):
-        if stored_split is None:
+        if spectrum is not None:
+            episode_key, probe_key = jax.random.split(
+                jax.random.fold_in(test_key, episode_index)
+            )
+            structured = sample_structured_episode(
+                episode_key, spectrum, n=args.n, c=args.context_count, q=args.queries
+            )
+            episode = structured.inputs
+            probe = structured_draws(
+                structured.context_factor, probe_key, jnp.uint32(0), length=32, k=args.k
+            )
+        elif stored_split is None:
             episode_key, diagnostic_key = jax.random.split(
                 jax.random.fold_in(test_key, episode_index)
             )
@@ -144,14 +234,25 @@ def evaluate(models, test_key, args, stored_split=None):
         for target in grid:
             for first in range(previous, target, args.chunk_size):
                 length = min(args.chunk_size, target - first)
-                if stored_split is None:
+                if stored_split is None and spectrum is None:
                     carry = stream_chunk(update, carry, episode, length, args.k)
                 else:
-                    draws = stored_split.draws(episode_index, first, first + length)
+                    if spectrum is None:
+                        draws = jax.device_put(
+                            stored_split.draws(episode_index, first, first + length)
+                        )
+                    else:
+                        draws = structured_draws(
+                            structured.context_factor,
+                            structured.draw_key,
+                            jnp.uint32(first),
+                            length=length,
+                            k=args.k,
+                        )
                     carry = advance_stored_chunk(
-                        update, carry, jax.device_put(draws), episode.observations
+                        update, carry, draws, episode.observations
                     )
-            if stored_split is None:
+            if stored_split is None and spectrum is None:
                 scores = score_prefix(
                     update, predictor, carry, episode, diagnostic_key, args.k
                 )
@@ -159,6 +260,7 @@ def evaluate(models, test_key, args, stored_split=None):
                 scores = score_prefix_from_draws(
                     update, predictor, carry, *episode, probe
                 )
+            scores, draw_count = jax.device_get((scores, carry.draw_count))
             nll, state_norm, drift_norm = map(float, scores)
             if not np.isfinite((nll, state_norm, drift_norm)).all():
                 raise ValueError(
@@ -168,7 +270,7 @@ def evaluate(models, test_key, args, stored_split=None):
                 {
                     "episode": episode_index,
                     "t": target,
-                    "draw_count": int(carry.draw_count),
+                    "draw_count": int(draw_count),
                     "nll": nll,
                     "state_norm": state_norm,
                     "mean_drift_norm": drift_norm,
@@ -243,7 +345,7 @@ def parse_args(argv=None):
         help="use the alternating readout or read committed embeddings directly",
     )
     parser.add_argument("--context-count", type=int)
-    parser.add_argument("--features", type=int)
+    parser.add_argument("--features", "--m", dest="features", type=int)
     parser.add_argument("--queries", type=int)
     parser.add_argument("--steps", type=int, default=10000)
     parser.add_argument("--peak-learning-rate", type=float, default=0.005)
@@ -253,8 +355,20 @@ def parse_args(argv=None):
     parser.add_argument("--eval-multiplier", type=int, default=16)
     parser.add_argument("--chunk-size", type=int, default=32)
     parser.add_argument("--k", type=int, help="joint draws per update block")
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--dataset", type=Path, help="offline simulation dataset directory"
+    )
+    mode.add_argument(
+        "--structured",
+        action="store_true",
+        help="simulate power-law kernel episodes online",
+    )
+    parser.add_argument(
+        "--n", type=int, help="structured population size (default 512)"
+    )
+    parser.add_argument(
+        "--alpha", type=float, help="structured power-law exponent (default 1.0)"
     )
     parser.add_argument("--eval-split", choices=("validation", "test"), default="test")
     parser.add_argument("--data-chunk-steps", type=int, default=1)
@@ -265,10 +379,21 @@ def parse_args(argv=None):
     )
     parser.set_defaults(lr_schedule="warmup-cosine")
     args = parser.parse_args(argv)
+    if args.structured:
+        args.n = 512 if args.n is None else args.n
+        args.queries = 8 if args.queries is None else args.queries
+        args.context_count = (
+            args.n - args.queries if args.context_count is None else args.context_count
+        )
+        args.alpha = 1.0 if args.alpha is None else args.alpha
+        if args.context_count + args.queries > args.n or args.n >= 2**31:
+            parser.error("require context count + queries <= n < 2^31")
+    elif args.n is not None or args.alpha is not None:
+        parser.error("--n and --alpha require --structured")
     if args.dataset is None:
         for name, default in {
             "context_count": 64,
-            "features": 16,
+            "features": 128 if args.structured else 16,
             "queries": 8,
             "k": 32,
             "test_episodes": 128,
@@ -285,6 +410,10 @@ def parse_args(argv=None):
         )
     if args.width % args.heads:
         parser.error("--heads must divide --width")
+    if args.structured and (
+        args.features > args.n or not np.isfinite(args.alpha) or args.alpha <= 0
+    ):
+        parser.error("structured mode requires m <= n and finite positive alpha")
     if not np.isfinite(args.peak_learning_rate) or args.peak_learning_rate <= 0:
         parser.error("--peak-learning-rate must be finite and positive")
     if (
@@ -339,15 +468,22 @@ def _shuffled_indices(size, seed):
 
 def run(args):
     dataset = train_split = eval_split = None
+    spectrum = None
     if args.dataset is not None:
         dataset, train_split, eval_split = _open_dataset(args)
+    elif args.structured:
+        spectrum = jnp.asarray(power_law_eigenvalues(args.n, args.features, args.alpha))
     args.output_dir.mkdir(parents=True, exist_ok=False)
     bins, init, train, test, bootstrap = jax.random.split(jax.random.key(args.seed), 5)
-    edges = (
-        prior_bin_edges(bins, jnp.empty((0, args.features), dtype=jnp.float32))
-        if dataset is None
-        else dataset.bin_edges
-    )
+    if spectrum is not None:
+        calibration = structured_calibration_targets(
+            bins, spectrum, n=args.n, q=args.queries
+        )
+        edges = np.quantile(np.asarray(calibration), np.linspace(0, 1, 33)).tolist()
+    elif dataset is not None:
+        edges = dataset.bin_edges
+    else:
+        edges = prior_bin_edges(bins, jnp.empty((0, args.features), dtype=jnp.float32))
     # Preserve the original experiment's predictor initialization key.
     update_key, predictor_key, _, _ = jax.random.split(init, 4)
     update = BayesUpdate(
@@ -429,9 +565,20 @@ def run(args):
             eval_split=eval_split.name,
             episode_order="seeded epoch permutations with batches across epoch boundaries",
         )
+    elif spectrum is not None:
+        metadata.update(
+            population_size=args.n,
+            spectral_rank=args.features,
+            training_episodes=args.steps * args.batch_size,
+            episode_order="fresh independent draws per optimizer step",
+        )
     (args.output_dir / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
 
-    train_chunk = make_train_chunk(optimizer, args)
+    train_chunk = (
+        make_train_chunk(optimizer, args)
+        if spectrum is None
+        else make_train_chunk(optimizer, args, spectrum)
+    )
     training_started = perf_counter()
     batch_load_seconds = 0.0
     if train_split is not None:
@@ -472,7 +619,7 @@ def run(args):
     eqx.tree_serialise_leaves(args.output_dir / "models.eqx", models)
 
     evaluation_started = perf_counter()
-    rows = evaluate(models, test, args, eval_split)
+    rows = evaluate(models, test, args, eval_split, spectrum)
     write_evaluation(
         args.output_dir, rows, args.t_max, np.asarray(jax.random.key_data(bootstrap))
     )

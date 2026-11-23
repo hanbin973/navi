@@ -42,7 +42,8 @@ changing them.
   predictive mean.
 - `navi/__init__.py` — public updater, predictor, and distribution imports.
 - `experiments/attention_proposal/` — axial-only training and prefix evaluation
-  matched to modular run 66615357, with optional offline spectral datasets.
+  for the legacy benchmark, online structured kernels, and offline spectral
+  datasets.
   Run `python -m experiments.attention_proposal.generate_data` to generate a
   dataset and `python -m experiments.attention_proposal.run` to train.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
@@ -58,7 +59,7 @@ changing them.
   reference, and training episode checks.
 - `tests/test_simulation.py`, `tests/test_simulation_data.py`, and
   `tests/test_structured_training.py` — spectral simulation, artifact
-  validation, and dataset-backed training and evaluation.
+  validation, and online and dataset-backed training and evaluation.
 - `tests/test_navi_model.py` — predictor context reuse, input validation, and bar-distribution checks.
 
 ## Design notes

@@ -179,7 +179,27 @@ to assemble and $O(qc)$ to hold. The axial proposal's context attention
 has quadratic work in $c$, so offline low-rank simulation alone gives no
 guarantee about the largest trainable context.
 
-## Generation and replay
+## Online structured runs
+
+Use `--structured` to generate a new factorized kernel, trait and updater
+draws for every episode. The defaults use $n=512$, $m=128$, 504 context rows,
+8 queries, and $\alpha=1.0$. At 10,000 optimizer updates with batch size 32,
+the runner generates 320,000 training episodes. Run from the repository root
+on an allocated compute node.
+
+```sh
+uv run --locked --no-sync python -m experiments.attention_proposal.run \
+  --structured --alpha 1.5 --steps 10000 --batch-size 32 \
+  --output-dir runs/spectral-online-a1p5
+```
+
+JAX samples episodes and accumulates the batch gradient on the device. The
+optimizer updates once per batch and training metrics return to the host in
+chunks of 100 updates. Held-out episodes and diagnostic draws use separate
+keys. `--n`, `--m`, `--alpha`, `--context-count`, and `--queries` control the
+simulation. The `--dataset` path below remains available for replay.
+
+## Offline generation and replay
 
 Run these commands from the repository root on an allocated compute node
 with the locked uv environment. This example uses a short horizon and two
@@ -210,6 +230,14 @@ before writing data. At the default episode counts and rollout lengths,
 the estimated array payload is about 5.8 GiB.
 
 ## Verification record
+
+The online path passed all 55 CPU tests. Slurm job `66669304` ran online
+generation on an NVIDIA A40 at $n=512$, $m=128$, and $\alpha=1.5$. Three
+optimizer updates at batch size two and two held-out evaluations through
+four rollout blocks completed with finite metrics. The local artifacts
+are under `runs/structured-kernel-pilot-20261123/online-n512-c504`.
+
+### Offline pilot
 
 The full CPU suite passed all 54 tests. Ruff lint and format checks passed
 for `navi`, `experiments`, `tests` and `harness`. Both repository-wide Ruff
