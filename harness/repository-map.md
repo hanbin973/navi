@@ -20,8 +20,6 @@ changing them.
 - `harness/cluster.md` — cluster rules, job prerequisites, and template routing.
 - `harness/slurm/python.sbatch` — common launcher for Python scripts and modules, with optional GPU diagnostics.
 - `harness/slurm/python-example.md` — mock Python workload, argument forwarding, and scheduler options.
-- `harness/slurm/bayes-update-spgpu.sbatch` — historical Bayesian-update GPU job.
-- `harness/slurm/` — workload-specific batch scripts and school reference example.
 - `harness/smoke.py` — small JAX/Equinox device execution check.
 - `harness/gpu_attention.py` — Slurm GPU comparison of Navi attention
   outputs and gradients on XLA and cuDNN.

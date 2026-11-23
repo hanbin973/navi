@@ -41,10 +41,10 @@ For a module, replace `mock_job.py` with `-m mock_job` and keep the same
 | Option | Where it applies |
 | --- | --- |
 | `--job-name` | Name the job in the scheduler. |
-| `--partition` | Select the partition. A comma-separated list lets Slurm choose an eligible partition. |
+| `--partition` | Use `--partition=debug` for nontrivial CPU debugging. A comma-separated list lets Slurm choose an eligible partition. |
 | `--account` | Charge the allocation to the project account. |
 | `--mail-user`, `--mail-type` | Configure optional notifications. For example, `BEGIN,END` sends start and end notices. |
-| `--gpus` | Request GPUs for a GPU workload. |
+| `--gpus` | Request one GPU with `--gpus=1 --partition=spgpu` or `--gpus=1 --partition=gpu_mig40`. If either partition works, use `--gpus=1 --partition=spgpu,gpu_mig40` to let Slurm choose. |
 | `--cpus-per-task` | Request CPUs for the Python process. The launcher uses this count as the default for `OMP_NUM_THREADS` and `OPENBLAS_NUM_THREADS`. Explicit values take precedence. |
 | `--mem`, `--mem-per-cpu` | Request memory either per node or per CPU. |
 | `--time` | Set the job's wall-time limit. |
