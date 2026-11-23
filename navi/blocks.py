@@ -9,14 +9,52 @@ import jax.numpy as jnp
 from jax import Array
 
 
+def _cudnn_attention(query, key, value, bias, mask):
+    query_count = query.shape[1]
+    key_count = key.shape[1]
+    logits_shape = (query.shape[0], query.shape[2], query_count, key_count)
+    query_pad, key_pad = query_count % 2, key_count % 2
+    # cuDNN training with a bias or mask requires even sequence lengths.
+    # Repeat the last query and drop its output. Mask any added key.
+    query_padding = ((0, 0), (0, query_pad), (0, 0), (0, 0))
+    key_padding = ((0, 0), (0, key_pad), (0, 0), (0, 0))
+    logits_padding = ((0, 0), (0, 0), (0, query_pad), (0, key_pad))
+    if bias is not None:
+        bias = jnp.pad(
+            jnp.broadcast_to(bias, logits_shape), logits_padding, mode="edge"
+        )
+        bias = bias.astype(jnp.bfloat16)
+    if mask is not None or key_pad:
+        allowed = (
+            jnp.ones(logits_shape, dtype=bool)
+            if mask is None
+            else jnp.broadcast_to(mask, logits_shape)
+        )
+        mask = jnp.pad(allowed, logits_padding, mode="edge")
+        mask = mask & (jnp.arange(key_count + key_pad) < key_count)
+    heads = jax.nn.dot_product_attention(
+        jnp.pad(query, query_padding, mode="edge").astype(jnp.bfloat16),
+        jnp.pad(key, key_padding).astype(jnp.bfloat16),
+        jnp.pad(value, key_padding).astype(jnp.bfloat16),
+        bias=bias,
+        mask=mask,
+        implementation="cudnn",
+    )
+    return heads[:, :query_count].astype(query.dtype)
+
+
 @final
 class _Attention(eqx.Module):
     w_q: Array
     w_k: Array
     w_v: Array
     w_out: Array
+    backend: str = eqx.field(static=True)
 
-    def __init__(self, width, heads, *, zero_init, key, init_gain=1.0):
+    def __init__(self, width, heads, *, zero_init, key, init_gain=1.0, backend="xla"):
+        if backend not in ("xla", "cudnn"):
+            raise ValueError("attention backend must be xla or cudnn")
+        self.backend = backend
         depth = width // heads
         shape = (heads, depth, width)
         bound = init_gain * math.sqrt(6 / (heads * depth + width))
@@ -42,9 +80,12 @@ class _Attention(eqx.Module):
 
     def __call__(self, query, source, *, bias=None, mask=None):
         q, k, v = self.project(query, source)
-        heads = jax.nn.dot_product_attention(
-            q, k, v, bias=bias, mask=mask, is_causal=False, implementation="xla"
-        )
+        if self.backend == "cudnn":
+            heads = _cudnn_attention(q, k, v, bias, mask)
+        else:
+            heads = jax.nn.dot_product_attention(
+                q, k, v, bias=bias, mask=mask, implementation="xla"
+            )
         return jnp.einsum("bthd,hds->bts", heads, self.w_out)
 
 
@@ -81,10 +122,22 @@ class _Block(eqx.Module):
 
     pre_norm: bool = eqx.field(static=True)
 
-    def __init__(self, width, heads, hidden_size, *, zero_init, key, pre_norm=False):
+    def __init__(
+        self,
+        width,
+        heads,
+        hidden_size,
+        *,
+        zero_init,
+        key,
+        pre_norm=False,
+        attention_backend="xla",
+    ):
         self.pre_norm = pre_norm
         attn, mlp = jax.random.split(key)
-        self.attention = _Attention(width, heads, zero_init=zero_init, key=attn)
+        self.attention = _Attention(
+            width, heads, zero_init=zero_init, key=attn, backend=attention_backend
+        )
         self.mlp = _MLP(
             width, hidden_size, width, bias=False, zero_init=zero_init, key=mlp
         )

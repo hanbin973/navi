@@ -152,6 +152,7 @@ class AxialAttentionProposal(AbstractProposal):
         key: JAX PRNG key for parameter initialization.
         pooling: Optional draw pooling module. Defaults to MeanPooling.
         depth: Number of axial layers.
+        attention_backend: JAX dot-product attention backend.
     """
 
     state_width: int = eqx.field(static=True)
@@ -173,6 +174,7 @@ class AxialAttentionProposal(AbstractProposal):
         key,
         pooling=None,
         depth=1,
+        attention_backend="xla",
     ):
         if any(
             type(size) is not int or size < 1
@@ -204,6 +206,7 @@ class AxialAttentionProposal(AbstractProposal):
                     zero_init=False,
                     pre_norm=pre_norm,
                     key=block_key,
+                    attention_backend=attention_backend,
                 )
                 for block_key in jax.random.split(layer_key)
             )

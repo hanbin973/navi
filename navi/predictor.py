@@ -146,6 +146,7 @@ class AlternatingContextEncoder(AbstractContextEncoder):
         use_draw_count: bool = False,
         use_gram_bias: bool = True,
         exact_kernel: bool = False,
+        attention_backend: str = "xla",
     ):
         if (
             type(state_width) is not int
@@ -184,6 +185,7 @@ class AlternatingContextEncoder(AbstractContextEncoder):
                 zero_init=zero_init,
                 key=block_key,
                 pre_norm=pre_norm,
+                attention_backend=attention_backend,
             )
             for block_key in keys[3 : 3 + context_depth]
         )
@@ -271,6 +273,7 @@ class AlternatingQueryDecoder(AbstractQueryDecoder):
         zero_init: bool = True,
         pre_norm: bool = False,
         kernel_bias_init_scale: float = 1.0,
+        attention_backend: str = "xla",
     ):
         if type(query_depth) is not int or query_depth < 1:
             raise ValueError("query_depth must be a positive integer")
@@ -299,6 +302,7 @@ class AlternatingQueryDecoder(AbstractQueryDecoder):
                 zero_init=zero_init,
                 key=next(keys),
                 pre_norm=pre_norm,
+                attention_backend=attention_backend,
             )
             for _ in range(query_depth)
         )
@@ -362,6 +366,7 @@ class LastContextQueryDecoder(AbstractQueryDecoder):
         zero_init: bool = True,
         pre_norm: bool = False,
         kernel_bias_init_scale: float = 1.0,
+        attention_backend: str = "xla",
     ):
         if type(num_context_states) is not int or num_context_states < 1:
             raise ValueError("num_context_states must be a positive integer")
@@ -377,6 +382,7 @@ class LastContextQueryDecoder(AbstractQueryDecoder):
             zero_init=zero_init,
             pre_norm=pre_norm,
             kernel_bias_init_scale=kernel_bias_init_scale,
+            attention_backend=attention_backend,
         )
 
     @property
@@ -442,6 +448,7 @@ class BarPredictor(AbstractPredictor):
         use_gram_bias: Whether to inject the context Gram matrix as an
             additive context-attention bias when a Gram matrix is available.
         exact_kernel: Require a supplied context kernel at encoding time.
+        attention_backend: JAX dot-product attention backend.
     """
 
     encoder: AbstractContextEncoder
@@ -464,6 +471,7 @@ class BarPredictor(AbstractPredictor):
         use_draw_count: bool = False,
         use_gram_bias: bool = True,
         exact_kernel: bool = False,
+        attention_backend: str = "xla",
         _components: tuple[AbstractContextEncoder, AbstractQueryDecoder] | None = None,
     ):
         self.distribution = FullSupportBarDistribution(bin_edges)
@@ -486,6 +494,7 @@ class BarPredictor(AbstractPredictor):
             use_draw_count=use_draw_count,
             use_gram_bias=use_gram_bias,
             exact_kernel=exact_kernel,
+            attention_backend=attention_backend,
         )
         self.decoder = AlternatingQueryDecoder(
             width=width,
@@ -497,6 +506,7 @@ class BarPredictor(AbstractPredictor):
             zero_init=zero_init,
             pre_norm=pre_norm,
             kernel_bias_init_scale=kernel_bias_init_scale,
+            attention_backend=attention_backend,
         )
 
     def __check_init__(self):

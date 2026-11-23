@@ -200,6 +200,7 @@ def parse_args(argv=None):
     parser.add_argument("--axial-depth", type=int, default=1)
     parser.add_argument("--history-capacity", type=int, default=3)
     parser.add_argument("--query-depth", type=int, default=3)
+    parser.add_argument("--attention-backend", choices=("xla", "cudnn"), default="xla")
     parser.add_argument(
         "--readout",
         choices=("alternating", "no-context-last-context"),
@@ -267,6 +268,7 @@ def run(args):
             depth=args.axial_depth,
             pre_norm=True,
             key=update_key,
+            attention_backend=args.attention_backend,
         ),
         TanhRunningMeanIntegrator(),
     )
@@ -282,6 +284,7 @@ def run(args):
             pre_norm=True,
             zero_init=False,
             key=predictor_key,
+            attention_backend=args.attention_backend,
         )
         predictor = BarPredictor.from_components(encoder, decoder, bin_edges=edges)
     else:
@@ -295,6 +298,7 @@ def run(args):
             use_gram_bias=False,
             bin_edges=edges,
             key=predictor_key,
+            attention_backend=args.attention_backend,
         )
     models = (update, predictor)
     learning_rate, rate_metadata = make_learning_rate(args)
@@ -308,6 +312,9 @@ def run(args):
         "checkpoint_version": 2,
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "pre_norm": True,
+        "attention_compute_dtype": "bfloat16"
+        if args.attention_backend == "cudnn"
+        else "float32",
         "context_encoder": type(predictor.encoder).__name__,
         "query_decoder": type(predictor.decoder).__name__,
         "context_width": predictor.encoder.context_width,
