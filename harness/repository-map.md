@@ -37,6 +37,8 @@ changing them.
 - `navi/distribution.py` — fixed PFNs full-support bars, query loss, and
   predictive mean.
 - `navi/__init__.py` — public updater, predictor, and distribution imports.
+- `experiments/attention_proposal/` — axial-only training and prefix evaluation
+  matched to modular run 66615357. Run `python -m experiments.attention_proposal.run`.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
   and held-out extrapolation evaluation. Replay from the original commit.
 - `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322
