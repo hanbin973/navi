@@ -59,6 +59,30 @@ def test_draw_count_conditioning_changes_context_encoding():
     close(initial - later, jnp.broadcast_to(count_weight / 4, initial.shape))
 
 
+@pytest.mark.parametrize(("use_gram_bias", "query_depth"), [(False, 2), (True, 1)])
+def test_context_diagonal_does_not_build_full_gram(use_gram_bias, query_depth):
+    predictor = BarPredictor(
+        state_width=3,
+        width=4,
+        num_heads=2,
+        query_depth=query_depth,
+        bin_edges=(-2, 0, 2),
+        use_gram_bias=use_gram_bias,
+        key=jax.random.key(10),
+    )
+    n = 7
+    observations = jnp.ones((n, 1))
+    state = jnp.arange(3 * n, dtype=jnp.float32).reshape((n, 3)) - 7
+    snapshot = ContextSnapshot(observations, state, jnp.int32(0))
+    diagonal = jnp.diag(state @ state.T)[:, None] / state.shape[1]
+    features = jnp.concatenate((observations, state, diagonal), axis=1)
+    expected = jax.vmap(predictor.context_projection)(features)
+    close(eqx.filter_jit(predictor.encode_context)(snapshot)[0], expected)
+
+    jaxpr = jax.make_jaxpr(predictor.encode_context)(snapshot).jaxpr
+    assert all(var.aval.shape != (n, n) for eqn in jaxpr.eqns for var in eqn.outvars)
+
+
 def test_full_support_bar_density_mean_and_gradient():
     distribution = FullSupportBarDistribution([-3, -1, 2, 6])
     logits = jnp.array([0.4, -0.3, 1.0])

@@ -71,8 +71,9 @@ class BarPredictor(AbstractPredictor):
     """Predict one row of marginal bar logits per query.
 
     The context encoder uses the latest embeddings, observations, and
-    embedding Gram matrix. The distribution interprets the output logits
-    for loss and predictive summaries.
+    the Gram diagonal when a context kernel or embeddings are available.
+    Context attention can also use the full Gram matrix as a bias. The
+    distribution interprets the output logits for loss and summaries.
 
     Args:
         state_width: Width of the committed embeddings. Use zero for a
@@ -237,6 +238,7 @@ class BarPredictor(AbstractPredictor):
         y = _features(y, (n, 1), "observations")
         state = _features(state, (n, self.state_width), "embeddings")
         features = [y, state]
+        gram_bias = self.gram_bias if self.context_blocks else None
         if self.exact_kernel:
             if gram is None:
                 raise ValueError("exact-kernel encoding requires a context kernel")
@@ -244,15 +246,18 @@ class BarPredictor(AbstractPredictor):
         elif gram is not None:
             raise ValueError("a supplied context kernel requires exact-kernel mode")
         elif self.state_width:
-            gram = (state @ state.T) / self.state_width
+            if gram_bias is None:
+                features.append(jnp.mean(jnp.square(state), axis=1, keepdims=True))
+            else:
+                gram = (state @ state.T) / self.state_width
         if gram is not None:
             features.append(jnp.diag(gram)[:, None])
         if self.use_draw_count:
             count_feature = 1 / (1 + jnp.asarray(draw_count, dtype=y.dtype))
             features.append(jnp.broadcast_to(count_feature, (n, 1)))
         bias = None
-        if self.gram_bias is not None and gram is not None:
-            bias = jax.vmap(jax.vmap(self.gram_bias))(gram[..., None])
+        if gram_bias is not None and gram is not None:
+            bias = jax.vmap(jax.vmap(gram_bias))(gram[..., None])
             bias = bias.transpose(2, 0, 1)[None]
         tokens = jax.vmap(self.context_projection)(jnp.concatenate(features, axis=1))
         return _encode_tokens(tokens, self.context_blocks, bias=bias)
