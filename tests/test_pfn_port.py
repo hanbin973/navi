@@ -135,3 +135,17 @@ def test_rectangular_attention_with_logit_bias(reference):
     ):
         close(actual, expected)
     assert jnp.linalg.norm(grads[-1]) > 0
+
+
+@pytest.mark.parametrize("pre_norm", [False, True])
+def test_rectangular_block_masks_excluded_keys(pre_norm):
+    block = _Block(4, 2, 7, zero_init=False, pre_norm=pre_norm, key=jax.random.key(8))
+    query = jnp.array([[1.0, 2.0, -3.0, 4.0]])
+    source = jnp.array([[0.5, -3.0, 1.0, 2.0], [2.0, 1.0, -0.5, 0.0]])
+    mask = jnp.array([[[[True, False]]]])
+    bias = jnp.array([[[[0.0, 100.0]], [[0.0, 100.0]]]])
+    forward = eqx.filter_jit(lambda b, q, s, m: b(q, s, bias=bias, mask=m))
+    expected = block(query, source[:1])
+    close(forward(block, query, source, mask), expected)
+    grad = jax.grad(lambda values: forward(block, query, values, mask).sum())(source)
+    np.testing.assert_array_equal(grad[1], 0.0)

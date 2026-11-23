@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from .blocks import _Block, _features
+from .blocks import _MLP, _Block, _features
 
 
 class BayesCarry(NamedTuple):
@@ -84,6 +84,44 @@ class AbstractAttentionBias(eqx.Module):
     def __call__(self, draws: Array) -> Array:
         """Map a draw block [N, K] to bias [1, heads, N, N]."""
         raise NotImplementedError
+
+
+class AbstractPooling(eqx.Module):
+    """Map exchangeable draws to features with a fixed output width."""
+
+    output_width: eqx.AbstractVar[int]
+
+    @abstractmethod
+    def __call__(self, draws: Array) -> Array:
+        """Map float32 draws [N, K] to float32 features [N, output_width].
+
+        The output is invariant to draw-column permutations and equivariant
+        to context-row permutations, up to floating-point roundoff.
+        """
+        raise NotImplementedError
+
+
+@final
+class MeanPooling(AbstractPooling):
+    """Mean-pool whole draws with learned scores shared across context rows."""
+
+    output_width: int = eqx.field(static=True)
+    scorer: _MLP
+
+    def __init__(self, width: int, *, key: Array):
+        if type(width) is not int or width < 1:
+            raise ValueError("pool output width must be a positive integer")
+        self.output_width = width
+        self.scorer = _MLP(1, width, width, bias=True, zero_init=False, key=key)
+
+    def __call__(self, draws: Array) -> Array:
+        if draws.ndim != 2 or not all(draws.shape):
+            raise ValueError("draws must have shape [N, K] with positive N and K")
+        if draws.dtype != jnp.float32:
+            raise TypeError("draws must have dtype float32")
+        row_scores = jax.vmap(jax.vmap(self.scorer))(draws[..., None])
+        scores = row_scores.mean(axis=0)
+        return (draws @ scores) / draws.shape[1]
 
 
 @final
@@ -166,6 +204,121 @@ class AttentionProposal(AbstractProposal):
         bias = None if self.attention_bias is None else self.attention_bias(draws)
         hidden = self.mixer(tokens, bias=bias)
         return jax.vmap(self.output_projection)(hidden)
+
+
+@final
+class AxialAttentionProposal(AbstractProposal):
+    """Propose one candidate using L - 1 committed states and a fresh block.
+
+    Each of the ``depth`` axial layers applies causal temporal attention
+    followed by context-row attention. The proposal reads the last slice.
+
+    Args:
+        state_width: Committed embedding and candidate width D.
+        width: Pool output and attention width W.
+        heads: Number of heads in each attention block. Must divide width.
+        history_capacity: Number of retained states, L - 1.
+        pre_norm: Whether to normalize before attention and MLP operations.
+        key: JAX PRNG key for parameter initialization.
+        pooling: Optional draw pooling module. Defaults to MeanPooling.
+        depth: Number of axial layers.
+    """
+
+    state_width: int = eqx.field(static=True)
+    history_capacity: int = eqx.field(static=True)
+    pooling: AbstractPooling
+    history_projection: eqx.nn.Linear
+    observation_projection: eqx.nn.Linear
+    layers: tuple[tuple[_Block, _Block], ...]
+    output_projection: eqx.nn.Linear
+
+    def __init__(
+        self,
+        state_width,
+        width,
+        heads,
+        *,
+        history_capacity,
+        pre_norm,
+        key,
+        pooling=None,
+        depth=1,
+    ):
+        if any(
+            type(size) is not int or size < 1
+            for size in (state_width, width, heads, depth)
+        ):
+            raise ValueError("proposal dimensions and depth must be positive integers")
+        if width % heads:
+            raise ValueError("width must be divisible by heads")
+        if not isinstance(pre_norm, bool):
+            raise TypeError("pre_norm must be a bool")
+        self.state_width = state_width
+        self.history_capacity = history_capacity
+        pool_key, history_key, observation_key, layers_key, output_key = (
+            jax.random.split(key, 5)
+        )
+        self.pooling = MeanPooling(width, key=pool_key) if pooling is None else pooling
+        self.history_projection = eqx.nn.Linear(
+            state_width, width, dtype=jnp.float32, key=history_key
+        )
+        self.observation_projection = eqx.nn.Linear(
+            1, width, dtype=jnp.float32, key=observation_key
+        )
+        self.layers = tuple(
+            tuple(
+                _Block(
+                    width,
+                    heads,
+                    2 * width,
+                    zero_init=False,
+                    pre_norm=pre_norm,
+                    key=block_key,
+                )
+                for block_key in jax.random.split(layer_key)
+            )
+            for layer_key in jax.random.split(layers_key, depth)
+        )
+        self.output_projection = eqx.nn.Linear(
+            width, state_width, dtype=jnp.float32, key=output_key
+        )
+
+    def __check_init__(self):
+        if self.pooling.output_width != self.history_projection.out_features:
+            raise ValueError("pool output width must match the proposal width")
+
+    @staticmethod
+    def _temporal_mask(valid):
+        causal = jnp.tri(valid.size, dtype=bool)
+        allowed = jnp.where(
+            valid[:, None], causal & valid[None, :], jnp.eye(valid.size, dtype=bool)
+        )
+        return allowed[None, None]
+
+    @staticmethod
+    def _mix_time(block, tokens, mask, valid):
+        mixed = jax.vmap(lambda row: block(row, mask=mask), in_axes=1, out_axes=1)(
+            tokens
+        )
+        return jnp.where(valid[:, None, None], mixed, 0)
+
+    def __call__(self, history, valid, draws, observations):
+        history = jnp.where(valid[:, None, None], history, 0)
+        past = jax.vmap(jax.vmap(self.history_projection))(history)
+        fresh = self.pooling(draws) + jax.vmap(self.observation_projection)(
+            observations
+        )
+        tokens = jnp.concatenate((past, fresh[None]), axis=0)
+        valid = jnp.concatenate((valid, jnp.ones((1,), dtype=bool)))
+        mask = self._temporal_mask(valid)
+
+        for temporal, context in self.layers[:-1]:
+            tokens = self._mix_time(temporal, tokens, mask, valid)
+            tokens = jnp.where(valid[:, None, None], jax.vmap(context)(tokens), 0)
+
+        temporal, context = self.layers[-1]
+        tokens = self._mix_time(temporal, tokens, mask, valid)
+        return jax.vmap(self.output_projection)(context(tokens[-1]))
 
 
 class AbstractIntegrator(eqx.Module):

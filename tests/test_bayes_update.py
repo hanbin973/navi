@@ -9,10 +9,13 @@ import pytest
 from navi import (
     AbstractAttentionBias,
     AbstractIntegrator,
+    AbstractPooling,
     AbstractProposal,
     AttentionProposal,
+    AxialAttentionProposal,
     BarPredictor,
     BayesUpdate,
+    MeanPooling,
     SecondMomentAttentionBias,
     TanhRunningMeanIntegrator,
     advance_chunk,
@@ -21,19 +24,22 @@ from navi import (
 from navi.training import prefix_mask
 
 
-def _fixture():
+def _fixture(axial=False):
     keys = jax.random.split(jax.random.key(17), 7)
-    update = BayesUpdate(
-        AttentionProposal(
+    if axial:
+        proposal = AxialAttentionProposal(
+            3, 8, 2, history_capacity=3, pre_norm=True, depth=2, key=keys[0]
+        )
+    else:
+        proposal = AttentionProposal(
             3,
             8,
             2,
             pre_norm=True,
             key=keys[0],
             attention_bias=SecondMomentAttentionBias(2, key=keys[6]),
-        ),
-        TanhRunningMeanIntegrator(),
-    )
+        )
+    update = BayesUpdate(proposal, TanhRunningMeanIntegrator())
     predictor = BarPredictor(
         state_width=3,
         width=8,
@@ -142,13 +148,179 @@ def test_joint_proposal_uses_draw_alignment_and_ignores_draw_order():
     assert not np.allclose(update.drift(carry, realigned, y), original)
 
 
-def test_update_and_predictor_have_context_permutation_symmetry():
-    update, predictor, y, u, pairs, draws = _fixture()
+def test_mean_pooling_averages_signed_scores_and_keeps_draw_alignment():
+    pool = MeanPooling(2, key=jax.random.key(27))
+    pool = eqx.tree_at(
+        lambda p: (
+            p.scorer.linear1.weight,
+            p.scorer.linear1.bias,
+            p.scorer.linear2.weight,
+            p.scorer.linear2.bias,
+        ),
+        pool,
+        (
+            jnp.array([[1.0], [-1.0]]),
+            jnp.zeros(2),
+            jnp.array([[1.0, -1.0], [0.0, 0.0]]),
+            jnp.array([0.0, 1.0]),
+        ),
+    )
+    apply = eqx.filter_jit(lambda model, draws: model(draws))
+    aligned = jnp.array([[1.0, -1.0], [1.0, -1.0]])
+    opposite = aligned.at[1].set(jnp.array([-1.0, 1.0]))
+    np.testing.assert_array_equal(apply(pool, aligned), [[1.0, 0.0], [1.0, 0.0]])
+    np.testing.assert_array_equal(apply(pool, opposite), jnp.zeros((2, 2)))
+
+    draws = jnp.array([[1.0, -2.0, 3.0], [0.5, -4.0, 2.0]])
+    expected = jnp.stack(
+        ((draws * draws.mean(axis=0)).mean(axis=1), draws.mean(axis=1)), axis=1
+    )
+    actual = apply(pool, draws)
+    assert actual.shape == (2, 2) and actual.dtype == jnp.float32
+    np.testing.assert_allclose(actual, expected, atol=1e-6)
+    np.testing.assert_allclose(
+        apply(pool, draws[:, jnp.array([2, 0, 1])]), actual, atol=1e-6
+    )
+    np.testing.assert_array_equal(apply(pool, draws[::-1]), actual[::-1])
+    np.testing.assert_array_equal(
+        apply(pool, draws[:, 1:2]), [[6.0, -2.0], [12.0, -4.0]]
+    )
+
+
+@final
+class BroadcastMeanPooling(AbstractPooling):
+    output_width: int = eqx.field(static=True)
+
+    def __call__(self, draws):
+        return jnp.broadcast_to(
+            draws.mean(axis=1, keepdims=True), (draws.shape[0], self.output_width)
+        )
+
+
+@pytest.mark.parametrize("depth", [1, 2])
+@jax.default_matmul_precision("highest")
+def test_axial_layers_are_causal_and_match_full_grid(depth):
+    width, state_width = 8, 3
+    model = AxialAttentionProposal(
+        state_width,
+        width,
+        2,
+        history_capacity=3,
+        pre_norm=True,
+        depth=depth,
+        key=jax.random.key(28),
+        pooling=BroadcastMeanPooling(width),
+    )
+    update = BayesUpdate(model, CommitCandidate())
+    state = update.initial_state(4)
+    draws = jnp.arange(8, dtype=jnp.float32).reshape(2, 4) / 4
+    observations = jnp.arange(4, dtype=jnp.float32)[:, None]
+    np.testing.assert_array_equal(state.valid, [False, False, True])
+
+    full_mask = jnp.array(
+        [
+            [True, False, False, False],
+            [False, True, False, False],
+            [False, False, True, False],
+            [False, False, True, True],
+        ]
+    )[None, None]
+    valid = jnp.array([False, False, True, True])
+    np.testing.assert_array_equal(model._temporal_mask(valid), full_mask)
+    pooled = jnp.broadcast_to(draws.mean(axis=0)[:, None], (4, width))
+
+    def full_grid(fresh):
+        past = jax.vmap(jax.vmap(model.history_projection))(state.history)
+        grid = jnp.concatenate((past, fresh[None]), axis=0)
+        stages = []
+        for temporal, context in model.layers:
+            grid = model._mix_time(temporal, grid, full_mask, valid)
+            stages.append(grid)
+            grid = jnp.where(valid[:, None, None], jax.vmap(context)(grid), 0)
+            stages.append(grid)
+        return jax.vmap(model.output_projection)(grid[-1]), stages
+
+    observed = jax.vmap(model.observation_projection)(observations)
+    expected, stages = full_grid(pooled + observed)
+    step = eqx.filter_jit(lambda update, carry, draw, y: update.step(carry, draw, y))
+    actual, _ = step(update, state, draws, observations)
+    assert actual.history.shape == (3, 4, state_width)
+    np.testing.assert_allclose(actual.history[-1], expected, atol=2e-6)
+
+    changed_observations = observations + 0.5
+    changed_expected, changed_stages = full_grid(
+        pooled + jax.vmap(model.observation_projection)(changed_observations)
+    )
+    changed, _ = step(update, state, draws, changed_observations)
+    np.testing.assert_allclose(changed.history[-1], changed_expected, atol=2e-6)
+    assert not np.allclose(changed.history[-1], actual.history[-1])
+    for before, after in zip(stages, changed_stages, strict=True):
+        np.testing.assert_array_equal(before[:2], 0.0)
+        np.testing.assert_allclose(before[2], after[2], atol=1e-6)
+
+
+def test_axial_proposal_validates_configuration_and_respects_history_mask():
+    update, _, observations, _, _, draws = _fixture(axial=True)
+    proposal = update.proposal
+    kwargs = {"history_capacity": 3, "pre_norm": True, "key": jax.random.key(29)}
+    for overrides, match in (
+        ({"pooling": BroadcastMeanPooling(4)}, "pool output width"),
+        ({"depth": 0}, "depth"),
+        ({"history_capacity": 0}, "history capacity"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            AxialAttentionProposal(3, 8, 2, **(kwargs | overrides))
+
+    carry = update.initial_state(len(observations))
+    initial = proposal(carry.history, carry.valid, draws[0].T, observations)
+    padded = carry.history.at[:2].set(jnp.nan)
+    actual = proposal(padded, carry.valid, draws[0].T, observations)
+    assert jnp.isfinite(actual).all()
+    np.testing.assert_array_equal(actual, initial)
+    grad = jax.grad(lambda h: proposal(h, carry.valid, draws[0].T, observations).sum())(
+        padded
+    )
+    np.testing.assert_array_equal(grad[:2], 0.0)
+
+    valid = jnp.array([False, True, True])
+    original = proposal(carry.history, valid, draws[0].T, observations)
+    older = jax.random.normal(jax.random.key(30), carry.history[1].shape)
+    different = proposal(
+        carry.history.at[1].set(older), valid, draws[0].T, observations
+    )
+    assert not np.allclose(different, original)
+
+
+@pytest.mark.parametrize("block_size", [1, 2])
+def test_axial_rollout_matches_chunked_history(block_size):
+    update, _, y, _, _, draws = _fixture(axial=True)
+    sequence = draws[:, 0] if block_size == 1 else draws
+    carry = update.initial_state(len(y))
+    advance = eqx.filter_jit(advance_chunk)
+    initial_chunk = advance(update, carry, sequence[:1], y)
+    np.testing.assert_array_equal(initial_chunk.valid, [False, True, True])
+    chunked = advance(update, initial_chunk, sequence[1:], y)
+    whole = advance(update, carry, sequence, y)
+    for actual, expected in zip(chunked, whole, strict=True):
+        np.testing.assert_allclose(actual, expected, atol=2e-6)
+    np.testing.assert_array_equal(whole.valid, [True, True, True])
+    assert whole.step == len(sequence)
+    assert whole.draw_count == len(sequence) * block_size
+
+
+@pytest.mark.parametrize("axial", [False, True], ids=["single_snapshot", "axial"])
+def test_update_and_predictor_have_context_permutation_symmetry(axial):
+    update, predictor, y, u, pairs, draws = _fixture(axial)
     initial = update.initial_state(len(y))
     order = jnp.array([2, 0, 3, 1])
     carry = advance_chunk(update, initial, draws[:2], y)
     permuted = advance_chunk(update, initial, draws[:2, :, order], y[order])
     np.testing.assert_allclose(permuted.history, carry.history[:, order], atol=2e-6)
+    candidate = update.proposal(carry.history, carry.valid, draws[2].T, y)
+    permuted_candidate = update.proposal(
+        permuted.history, permuted.valid, draws[2, ::-1, :].T[order], y[order]
+    )
+    np.testing.assert_allclose(permuted_candidate, candidate[order], atol=2e-6)
     context = predictor.encode_context(update.snapshot(carry, y))
     permuted_context = predictor.encode_context(update.snapshot(permuted, y[order]))
     np.testing.assert_allclose(
@@ -158,8 +330,10 @@ def test_update_and_predictor_have_context_permutation_symmetry():
     )
 
 
-def test_scored_rollout_matches_manual_prefixes_and_batches():
-    update, predictor, y, u, pairs, draws = _fixture()
+@pytest.mark.parametrize("axial", [False, True], ids=["single_snapshot", "axial"])
+@jax.default_matmul_precision("highest")
+def test_scored_rollout_matches_manual_prefixes_and_batches(axial):
+    update, predictor, y, u, pairs, draws = _fixture(axial)
     targets = jnp.array([0.2, -0.1])
     loss = predictor.distribution.loss
     for horizon, expected in ((1, [1]), (4, [1, 2, 4]), (5, [1, 2, 4, 5])):
@@ -187,8 +361,9 @@ def test_scored_rollout_matches_manual_prefixes_and_batches():
         eqx.filter_jit(score)(draws, jnp.int32(0)).block_until_ready()
 
 
-def test_late_loss_differentiates_through_early_draw_and_both_networks():
-    update, predictor, y, u, pairs, draws = _fixture()
+@pytest.mark.parametrize("axial", [False, True], ids=["single_snapshot", "axial"])
+def test_late_loss_differentiates_through_early_draw_and_both_networks(axial):
+    update, predictor, y, u, pairs, draws = _fixture(axial)
     targets = jnp.array([0.2, -0.1])
 
     def score(inputs):
@@ -207,6 +382,8 @@ def test_late_loss_differentiates_through_early_draw_and_both_networks():
         )
 
     grads = eqx.filter_jit(eqx.filter_grad(score))((update, predictor, draws[0]))
+    if axial:
+        grads += (grads[0].proposal.pooling, grads[0].proposal.layers)
     for tree in grads:
         leaves = jax.tree.leaves(tree)
         assert all(np.isfinite(value).all() for value in leaves)
