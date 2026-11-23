@@ -80,10 +80,15 @@ def test_paired_scores_match_dense_grid_integration():
     log_weights = -0.5 * (y.size * np.log(total) + (y @ y) / total)
     weights = np.exp(log_weights - log_weights.max())
     plug_in = np.average(genetic, weights=weights)
-    identity = _normal_masses(0.0, plug_in, distribution.edges)
+    identity = np.array(
+        [
+            _normal_masses(0.0, plug_in * diagonal, distribution.edges)
+            for diagonal in np.diag(fq @ fq.T)
+        ]
+    )
     expected = [
         distribution.loss(jnp.log(masses), targets),
-        distribution.loss(jnp.log(np.broadcast_to(identity, masses.shape)), targets),
+        distribution.loss(jnp.log(identity), targets),
     ]
     actual = paired_bar_scores(
         distribution, *(jnp.asarray(array) for array in (fc, fq, y, targets))

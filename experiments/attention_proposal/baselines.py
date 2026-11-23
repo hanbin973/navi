@@ -95,16 +95,17 @@ def paired_bar_scores(
         jax.nn.log_softmax(evidence)[:, None, None] + component_logits, axis=0
     )
 
-    # With disjoint context and queries, K=I makes their latent effects independent.
-    # Context data identify g+r. The same symmetric prior defines a plug-in g.
+    # Fit g from identity-kernel context evidence, where the data identify g+r.
+    # Predict independent query effects with their original kernel diagonals.
     total_variance = genetic + residual
     y_squared = jnp.dot(observations, observations, precision=_HIGHEST)
     identity_evidence = -0.5 * (
         observations.size * jnp.log(total_variance) + y_squared / total_variance
     )
     genetic_plugin = jnp.sum(jax.nn.softmax(identity_evidence) * genetic)
+    query_self_kernel = jnp.sum(query_factor**2, axis=-1)
     identity_logits = _normal_bar_log_masses(
-        jnp.zeros_like(targets), jnp.full_like(targets, genetic_plugin), edges
+        jnp.zeros_like(targets), genetic_plugin * query_self_kernel, edges
     )
     return distribution.loss(oracle_logits, targets), distribution.loss(
         identity_logits, targets
