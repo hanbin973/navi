@@ -5,6 +5,7 @@ import csv
 import json
 import logging
 import os
+from itertools import islice
 from pathlib import Path
 from time import perf_counter
 
@@ -21,6 +22,7 @@ from experiments.modular_bayes.run import (
     prior_bin_edges,
     sample_episode,
     score_prefix,
+    score_prefix_from_draws,
     stream_chunk,
 )
 from navi import (
@@ -30,41 +32,52 @@ from navi import (
     LastContextQueryDecoder,
     NoContextEncoder,
     TanhRunningMeanIntegrator,
+    advance_chunk,
     rollout_loss,
 )
+from navi.helper import TrainingEpisode
+from navi.simulation_data import SimulationDataset
 
 logger = logging.getLogger(__name__)
+advance_stored_chunk = eqx.filter_jit(advance_chunk)
 
 
 def make_train_chunk(optimizer, args):
-    def train_step(models, opt_state, key):
+    def train_step(models, opt_state, key, stored_batch):
         episode_key, horizon_key = jax.random.split(key)
         horizon = jax.random.randint(horizon_key, (), 2, args.t_max + 1)
-        keys = jax.random.split(episode_key, args.batch_size)
-        steps = jnp.arange(args.t_max, dtype=jnp.uint32)
 
-        def episode_loss(models, key):
+        def episode_loss(models, episode, draws):
             update, predictor = models
-            episode = sample_episode(
-                key, args.context_count, args.features, args.queries
-            )
-            draws = _step_draws(episode.panel, episode.draw_key, steps, args.k)
             return rollout_loss(
                 update,
                 predictor,
-                episode.y,
-                episode.u,
-                episode.pairs,
-                episode.targets,
+                *episode,
                 draws,
                 horizon,
                 loss=predictor.distribution.loss,
                 min_prefix=2,
             )
 
+        def online_loss(models, key):
+            episode = sample_episode(
+                key, args.context_count, args.features, args.queries
+            )
+            steps = jnp.arange(args.t_max, dtype=jnp.uint32)
+            draws = _step_draws(episode.panel, episode.draw_key, steps, args.k)
+            inputs = TrainingEpisode(
+                episode.y, episode.u, episode.pairs, episode.targets
+            )
+            return episode_loss(models, inputs, draws)
+
         def objective(models):
             # Sharing the horizon across episodes keeps scan conditionals scalar.
-            return jax.vmap(episode_loss, in_axes=(None, 0))(models, keys).mean()
+            if stored_batch is None:
+                keys = jax.random.split(episode_key, args.batch_size)
+                return jax.vmap(online_loss, in_axes=(None, 0))(models, keys).mean()
+            return jax.vmap(episode_loss, in_axes=(None, 0, 0))(
+                models, stored_batch.episodes, stored_batch.draws
+            ).mean()
 
         loss, grads = eqx.filter_value_and_grad(objective)(models)
         updates, opt_state = optimizer.update(grads, opt_state)
@@ -77,15 +90,19 @@ def make_train_chunk(optimizer, args):
         return models, opt_state, loss, finite
 
     @eqx.filter_jit
-    def train_chunk(models, opt_state, key, first_step, length):
+    def train_chunk(models, opt_state, key, first_step, length, batches=None):
         params, static = eqx.partition(models, eqx.is_inexact_array)
 
-        def advance(carry, step):
+        def advance(carry, inputs):
             params, state, healthy = carry
+            step, batch = inputs
 
             def apply_update():
                 model, state_next, loss, finite = train_step(
-                    eqx.combine(params, static), state, jax.random.fold_in(key, step)
+                    eqx.combine(params, static),
+                    state,
+                    jax.random.fold_in(key, step),
+                    batch,
                 )
                 return (eqx.filter(model, eqx.is_inexact_array), state_next, finite), (
                     loss,
@@ -98,33 +115,51 @@ def make_train_chunk(optimizer, args):
 
         steps = first_step + jnp.arange(length, dtype=jnp.uint32)
         (params, opt_state, _), metrics = jax.lax.scan(
-            advance, (params, opt_state, jnp.bool_(True)), steps
+            advance, (params, opt_state, jnp.bool_(True)), (steps, batches)
         )
         return eqx.combine(params, static), opt_state, metrics
 
     return train_chunk
 
 
-def evaluate(models, test_key, args):
+def evaluate(models, test_key, args, stored_split=None):
     update, predictor = models
-    sample = jax.jit(sample_episode, static_argnums=(1, 2, 3))
+    if stored_split is None:
+        sample = jax.jit(sample_episode, static_argnums=(1, 2, 3))
     rows = []
     grid = checkpoints(args.t_max, args.eval_multiplier)
     for episode_index in range(args.test_episodes):
-        episode_key, diagnostic_key = jax.random.split(
-            jax.random.fold_in(test_key, episode_index)
-        )
-        episode = sample(episode_key, args.context_count, args.features, args.queries)
+        if stored_split is None:
+            episode_key, diagnostic_key = jax.random.split(
+                jax.random.fold_in(test_key, episode_index)
+            )
+            episode = sample(
+                episode_key, args.context_count, args.features, args.queries
+            )
+        else:
+            episode = jax.device_put(stored_split.episode(episode_index))
+            probe = jax.device_put(stored_split.draws(episode_index, probe=True))
         carry = update.initial_state(args.context_count)
         previous = 0
         for target in grid:
             for first in range(previous, target, args.chunk_size):
                 length = min(args.chunk_size, target - first)
-                carry = stream_chunk(update, carry, episode, length, args.k)
-            nll, state_norm, drift_norm = map(
-                float,
-                score_prefix(update, predictor, carry, episode, diagnostic_key, args.k),
-            )
+                if stored_split is None:
+                    carry = stream_chunk(update, carry, episode, length, args.k)
+                else:
+                    draws = stored_split.draws(episode_index, first, first + length)
+                    carry = advance_stored_chunk(
+                        update, carry, jax.device_put(draws), episode.observations
+                    )
+            if stored_split is None:
+                scores = score_prefix(
+                    update, predictor, carry, episode, diagnostic_key, args.k
+                )
+            else:
+                scores = score_prefix_from_draws(
+                    update, predictor, carry, *episode, probe
+                )
+            nll, state_norm, drift_norm = map(float, scores)
             if not np.isfinite((nll, state_norm, drift_norm)).all():
                 raise ValueError(
                     f"nonfinite evaluation at episode {episode_index}, prefix {target}"
@@ -207,19 +242,22 @@ def parse_args(argv=None):
         default="alternating",
         help="use the alternating readout or read committed embeddings directly",
     )
-    parser.add_argument("--context-count", type=int, default=64)
-    parser.add_argument("--features", type=int, default=16)
-    parser.add_argument("--queries", type=int, default=8)
+    parser.add_argument("--context-count", type=int)
+    parser.add_argument("--features", type=int)
+    parser.add_argument("--queries", type=int)
     parser.add_argument("--steps", type=int, default=10000)
     parser.add_argument("--peak-learning-rate", type=float, default=0.005)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--test-episodes", type=int, default=128)
+    parser.add_argument("--test-episodes", type=int)
     parser.add_argument("--t-max", type=int, default=32)
     parser.add_argument("--eval-multiplier", type=int, default=16)
     parser.add_argument("--chunk-size", type=int, default=32)
+    parser.add_argument("--k", type=int, help="joint draws per update block")
     parser.add_argument(
-        "--k", type=int, default=32, help="joint draws per update block"
+        "--dataset", type=Path, help="offline simulation dataset directory"
     )
+    parser.add_argument("--eval-split", choices=("validation", "test"), default="test")
+    parser.add_argument("--data-chunk-steps", type=int, default=1)
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -227,6 +265,16 @@ def parse_args(argv=None):
     )
     parser.set_defaults(lr_schedule="warmup-cosine")
     args = parser.parse_args(argv)
+    if args.dataset is None:
+        for name, default in {
+            "context_count": 64,
+            "features": 16,
+            "queries": 8,
+            "k": 32,
+            "test_episodes": 128,
+        }.items():
+            if getattr(args, name) is None:
+                setattr(args, name, default)
 
     for name, value in vars(args).items():
         if type(value) is int and name != "seed" and value < 1:
@@ -239,7 +287,10 @@ def parse_args(argv=None):
         parser.error("--heads must divide --width")
     if not np.isfinite(args.peak_learning_rate) or args.peak_learning_rate <= 0:
         parser.error("--peak-learning-rate must be finite and positive")
-    if args.t_max * args.eval_multiplier * args.k >= 2**31 or 32 * args.k >= 2**31:
+    if (
+        args.k is not None
+        and max(args.t_max * args.eval_multiplier, 32) * args.k >= 2**31
+    ):
         parser.error("draw counts must fit in int32")
     if not 0 <= args.seed < 2**32 or args.steps >= 2**31:
         parser.error("--seed must fit in uint32 and --steps must fit in int32")
@@ -253,10 +304,50 @@ def parse_args(argv=None):
     return args
 
 
+def _open_dataset(args):
+    dataset = SimulationDataset(args.dataset)
+    config = dataset.config
+    for name, stored in {
+        "context_count": config.c,
+        "features": config.m,
+        "queries": config.q,
+        "k": config.k,
+    }.items():
+        value = getattr(args, name)
+        if value is not None and value != stored:
+            raise ValueError(f"{name}={value} differs from stored value {stored}")
+        setattr(args, name, stored)
+    train_split = dataset.split("train", horizon=args.t_max)
+    eval_split = dataset.split(
+        args.eval_split, horizon=args.t_max * args.eval_multiplier
+    )
+    if max(eval_split.horizon, 32) * args.k >= 2**31:
+        raise ValueError("draw counts must fit in int32")
+    if args.test_episodes is None:
+        args.test_episodes = len(eval_split)
+    elif args.test_episodes > len(eval_split):
+        raise ValueError("requested evaluation episode count exceeds the stored split")
+    return dataset, train_split, eval_split
+
+
+def _shuffled_indices(size, seed):
+    """Make one seeded permutation per epoch, carrying remainders into batches."""
+    rng = np.random.default_rng(seed)
+    while True:
+        yield from rng.permutation(size)
+
+
 def run(args):
+    dataset = train_split = eval_split = None
+    if args.dataset is not None:
+        dataset, train_split, eval_split = _open_dataset(args)
     args.output_dir.mkdir(parents=True, exist_ok=False)
     bins, init, train, test, bootstrap = jax.random.split(jax.random.key(args.seed), 5)
-    edges = prior_bin_edges(bins, jnp.empty((0, args.features), dtype=jnp.float32))
+    edges = (
+        prior_bin_edges(bins, jnp.empty((0, args.features), dtype=jnp.float32))
+        if dataset is None
+        else dataset.bin_edges
+    )
     # Preserve the original experiment's predictor initialization key.
     update_key, predictor_key, _, _ = jax.random.split(init, 4)
     update = BayesUpdate(
@@ -308,6 +399,7 @@ def run(args):
     device = jax.devices()[0]
     metadata = vars(args) | {
         "output_dir": str(args.output_dir),
+        "dataset": str(args.dataset) if dataset is not None else None,
         "reference_run": "modular-bayes-66615357",
         "checkpoint_version": 2,
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
@@ -327,18 +419,45 @@ def run(args):
         "equinox_version": eqx.__version__,
         "optax_version": optax.__version__,
     }
+    if dataset is not None:
+        metadata.update(
+            dataset_id=dataset.dataset_id,
+            population_size=dataset.config.n,
+            spectral_rank=dataset.config.m,
+            alpha=dataset.config.alpha,
+            train_split=train_split.name,
+            eval_split=eval_split.name,
+            episode_order="seeded epoch permutations with batches across epoch boundaries",
+        )
     (args.output_dir / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
 
     train_chunk = make_train_chunk(optimizer, args)
     training_started = perf_counter()
+    batch_load_seconds = 0.0
+    if train_split is not None:
+        indices = _shuffled_indices(len(train_split), args.seed)
     with (args.output_dir / "training.csv").open("w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(("step", "nll"))
-        report_every = 100
+        report_every = args.data_chunk_steps if dataset is not None else 100
         for first_step in range(1, args.steps + 1, report_every):
             length = min(report_every, args.steps - first_step + 1)
+            batches = None
+            if train_split is not None:
+                load_started = perf_counter()
+                loaded = [
+                    train_split.batch(tuple(islice(indices, args.batch_size)))
+                    for _ in range(length)
+                ]
+                stacked = (
+                    jax.tree.map(lambda array: array[None], loaded[0])
+                    if length == 1
+                    else jax.tree.map(lambda *arrays: np.stack(arrays), *loaded)
+                )
+                batches = jax.device_put(stacked)
+                batch_load_seconds += perf_counter() - load_started
             models, opt_state, metrics = train_chunk(
-                models, opt_state, train, jnp.uint32(first_step), length
+                models, opt_state, train, jnp.uint32(first_step), length, batches
             )
             losses, finite = jax.device_get(metrics)
             valid_count = length if finite.all() else int(np.argmin(finite))
@@ -353,7 +472,7 @@ def run(args):
     eqx.tree_serialise_leaves(args.output_dir / "models.eqx", models)
 
     evaluation_started = perf_counter()
-    rows = evaluate(models, test, args)
+    rows = evaluate(models, test, args, eval_split)
     write_evaluation(
         args.output_dir, rows, args.t_max, np.asarray(jax.random.key_data(bootstrap))
     )
@@ -363,6 +482,8 @@ def run(args):
         "evaluation_seconds": perf_counter() - evaluation_started,
         "peak_device_bytes_in_use": memory.get("peak_bytes_in_use"),
     }
+    if dataset is not None:
+        resources["training_batch_load_seconds"] = batch_load_seconds
     (args.output_dir / "resources.json").write_text(
         json.dumps(resources, indent=2) + "\n"
     )
