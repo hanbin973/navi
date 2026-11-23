@@ -7,18 +7,22 @@ Use [the common Python launcher](slurm/python.sbatch) with
 repository root with a prepared uv environment. Put scheduler options before
 the launcher path and Python arguments after it.
 
-The launcher takes resources and backend settings from the submission
-command. Its Python entry point has passed a GPU smoke check on `spgpu`.
+The launcher defaults to `spgpu,gpu-rtx6000,gpu_mig40` for GPU jobs. Slurm can
+place the job on any of the three partitions. Set resources and the JAX
+backend on the submission command. Pass `--partition` explicitly when a job
+needs a particular partition.
 
 ## Scope and safety
 
-- Use the `debug` partition for the small CPU smoke job. The GPU smoke job
-  can run on `spgpu` or `gpu_mig40` after confirming its resource request.
+- Pass `--partition=debug` for a CPU smoke job to override the GPU default.
+- Request one GPU with `--gpus=1` unless a different count is explicitly
+  requested. Use a single partition when the workload needs a specific GPU
+  or exceeds the memory of the smallest eligible GPU.
 - Use Slurm account `jonth0`. For email notifications with the common
   launcher, pass `--mail-user=hblee@umich.edu --mail-type=BEGIN,END`
   as scheduler options.
-- The `spgpu` partition uses NVIDIA A40 GPUs with 48 GB of memory per GPU.
-  Set `--gpus=1` unless a different count is explicitly requested.
+- The default list includes NVIDIA A40 GPUs on `spgpu`, RTX PRO 6000
+  Blackwell GPUs on `gpu-rtx6000`, and 40 GB A100 MIG slices on `gpu_mig40`.
 - Do not run substantial computations on the login node. Follow the site's
   filesystem policy; do not recursively search shared roots or other allocations.
 - Do not poll Slurm in loops or with `watch`; check at most once per minute, or

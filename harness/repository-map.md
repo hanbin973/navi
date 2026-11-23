@@ -26,7 +26,9 @@ changing them.
 
 ## Application code and tests
 
-- `navi/bayes_update.py` — proposal and integrator interfaces, recurrent update, and draw rollouts.
+- `navi/bayes_update.py` — single-snapshot and axial proposals, prefix-conditioned
+  Deep Sets draw pooling, integrator interfaces, recurrent updates, and draw
+  rollouts.
 - `navi/predictor.py` — predictor interface and bar logits from recurrent context snapshots.
 - `navi/training.py` — draw-prefix selection and the training objective that composes updater and predictor.
 - `navi/blocks.py` — shared dense PFNs attention, MLP, and Transformer blocks.
@@ -35,6 +37,8 @@ changing them.
 - `navi/distribution.py` — fixed PFNs full-support bars, query loss, and
   predictive mean.
 - `navi/__init__.py` — public updater, predictor, and distribution imports.
+- `experiments/attention_proposal/` — axial-only training and prefix evaluation
+  matched to modular run 66615357. Run `python -m experiments.attention_proposal.run`.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
   and held-out extrapolation evaluation. Replay from the original commit.
 - `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322
@@ -51,6 +55,8 @@ changing them.
 
 ## Design notes
 
+- `impl/attention_update/` — axial proposal design, implementation plan, and
+  verification record.
 - `impl/modular_bayes/` — modular updater and predictor design and implementation record.
 
 - `impl/bayes_update/impl_bayes_update.md` — approximate Bayesian update

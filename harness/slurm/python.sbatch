@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+#SBATCH --partition=spgpu,gpu-rtx6000,gpu_mig40
 # Request resources with sbatch options before this script's path.
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:?Submit from the repository root}"

@@ -23,11 +23,12 @@ print("Working directory", Path.cwd())
 print("JAX devices", jax.devices())
 ```
 
-Submit the mock workload with a short GPU allocation.
+Submit the mock workload with a short GPU allocation. The launcher uses
+`spgpu,gpu-rtx6000,gpu_mig40` unless you pass `--partition` explicitly.
 
 ```bash
 JAX_PLATFORMS=cuda sbatch --parsable --job-name=python-example \
-  --partition=spgpu --account=jonth0 \
+  --account=jonth0 \
   --gpus=1 --cpus-per-task=2 --mem=32G --time=00:05:00 \
   harness/slurm/python.sbatch mock_job.py --message "hello from Slurm"
 ```
@@ -41,10 +42,10 @@ For a module, replace `mock_job.py` with `-m mock_job` and keep the same
 | Option | Where it applies |
 | --- | --- |
 | `--job-name` | Name the job in the scheduler. |
-| `--partition` | Use `--partition=debug` for nontrivial CPU debugging. A comma-separated list lets Slurm choose an eligible partition. |
+| `--partition` | Defaults to `spgpu,gpu-rtx6000,gpu_mig40`. Pass `--partition=debug` for CPU debugging or specify a GPU partition for hardware-specific work. |
 | `--account` | Charge the allocation to the project account. |
 | `--mail-user`, `--mail-type` | Configure optional notifications. For example, `BEGIN,END` sends start and end notices. |
-| `--gpus` | Request one GPU with `--gpus=1 --partition=spgpu` or `--gpus=1 --partition=gpu_mig40`. If either partition works, use `--gpus=1 --partition=spgpu,gpu_mig40` to let Slurm choose. |
+| `--gpus` | Request one GPU with `--gpus=1`. Slurm selects an eligible partition from the launcher's list or the list supplied with `--partition`. |
 | `--cpus-per-task` | Request CPUs for the Python process. The launcher uses this count as the default for `OMP_NUM_THREADS` and `OPENBLAS_NUM_THREADS`. Explicit values take precedence. |
 | `--mem`, `--mem-per-cpu` | Request memory either per node or per CPU. |
 | `--time` | Set the job's wall-time limit. |

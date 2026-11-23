@@ -40,10 +40,10 @@ class _Attention(eqx.Module):
             jnp.einsum("bts,hds->bthd", source, self.w_v),
         )
 
-    def __call__(self, query, source, *, bias=None):
+    def __call__(self, query, source, *, bias=None, mask=None):
         q, k, v = self.project(query, source)
         heads = jax.nn.dot_product_attention(
-            q, k, v, bias=bias, is_causal=False, implementation="xla"
+            q, k, v, bias=bias, mask=mask, is_causal=False, implementation="xla"
         )
         return jnp.einsum("bthd,hds->bts", heads, self.w_out)
 
@@ -95,18 +95,20 @@ class _Block(eqx.Module):
             width, eps=1e-5, use_weight=False, use_bias=False
         )
 
-    def __call__(self, tokens, source=None, *, bias=None, read_scale=1.0):
+    def __call__(self, tokens, source=None, *, bias=None, mask=None, read_scale=1.0):
         if self.pre_norm:
             normalized = jax.vmap(self.attention_norm)(tokens)
             memory = (
                 normalized if source is None else jax.vmap(self.attention_norm)(source)
             )
-            read = self.attention(normalized[None], memory[None], bias=bias)[0]
+            read = self.attention(normalized[None], memory[None], bias=bias, mask=mask)[
+                0
+            ]
             tokens = tokens + read_scale * read
             return tokens + jax.vmap(self.mlp)(jax.vmap(self.mlp_norm)(tokens))
 
         source = tokens if source is None else source
-        read = self.attention(tokens[None], source[None], bias=bias)[0]
+        read = self.attention(tokens[None], source[None], bias=bias, mask=mask)[0]
         tokens = tokens + read_scale * read
         tokens = jax.vmap(self.attention_norm)(tokens)
         return jax.vmap(self.mlp_norm)(tokens + jax.vmap(self.mlp)(tokens))
