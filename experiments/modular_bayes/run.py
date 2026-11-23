@@ -29,13 +29,20 @@ class Episode(NamedTuple):
 
 
 def sample_episode(key, context_count, feature_count, query_count):
+    episode, _, _ = sample_episode_with_factors(
+        key, context_count, feature_count, query_count
+    )
+    return episode
+
+
+def sample_episode_with_factors(key, context_count, feature_count, query_count):
     panel_key, trait_key, draw_key = jax.random.split(key, 3)
     panel = jax.random.normal(
         panel_key, (context_count, feature_count), dtype=jnp.float32
     )
     trait = draw_episode(trait_key, panel, query_count)
     u, pairs = query_features(panel, trait.query_rows)
-    return Episode(
+    episode = Episode(
         panel,
         trait.observed[:, None],
         u,
@@ -44,6 +51,8 @@ def sample_episode(key, context_count, feature_count, query_count):
         panel @ panel.T / feature_count,
         draw_key,
     )
+    scale = np.sqrt(feature_count)
+    return episode, panel / scale, trait.query_rows / scale
 
 
 def kernel_draws(panel, key, indices):

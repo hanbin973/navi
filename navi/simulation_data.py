@@ -327,6 +327,11 @@ class SimulationSplit:
         return self._cached[1], index - first
 
     def episode(self, index: int) -> TrainingEpisode:
+        episode, _, _ = self.episode_with_factors(index)
+        return episode
+
+    def episode_with_factors(self, index: int):
+        """Read model inputs with the selected context and query factor rows."""
         shard, offset = self._locate(index)
         context = shard["context"][offset]
         queries = shard["queries"][offset]
@@ -349,7 +354,7 @@ class SimulationSplit:
             or np.any(variances <= 0)
         ):
             raise ValueError("invalid stored data or derived features")
-        return episode
+        return episode, fc, fq
 
     def draws(
         self,

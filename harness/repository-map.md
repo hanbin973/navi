@@ -46,6 +46,8 @@ changing them.
   datasets.
   Run `python -m experiments.attention_proposal.generate_data` to generate a
   dataset and `python -m experiments.attention_proposal.run` to train.
+- `experiments/attention_proposal/baselines.py` — factor-space Gaussian
+  references and bar-projected NLL for held-out axial episodes.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
   and held-out extrapolation evaluation. Replay from the original commit.
 - `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322

@@ -17,12 +17,17 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+from experiments.attention_proposal.baselines import (
+    VARIANCE_GRID_SIZE,
+    paired_bar_scores,
+)
 from experiments.modular_bayes.run import (
     _step_draws,
     checkpoints,
     make_learning_rate,
     prior_bin_edges,
     sample_episode,
+    sample_episode_with_factors,
     score_prefix,
     score_prefix_from_draws,
     stream_chunk,
@@ -39,6 +44,7 @@ from navi import (
 )
 from navi.helper import TrainingEpisode
 from navi.simulation import (
+    LOG2_VARIANCE_BOUNDS,
     kernel_features,
     power_law_eigenvalues,
     sample_updater_draws,
@@ -49,11 +55,13 @@ from navi.simulation_data import SimulationDataset
 
 logger = logging.getLogger(__name__)
 advance_stored_chunk = eqx.filter_jit(advance_chunk)
+STRUCTURED_CALIBRATION_EPISODES = 1024
 
 
 class StructuredEpisode(NamedTuple):
     inputs: TrainingEpisode
     context_factor: jax.Array
+    query_factor: jax.Array
     draw_key: jax.Array
 
 
@@ -67,7 +75,7 @@ def sample_structured_episode(key, spectrum, *, n, c, q):
     valid_basis = jnp.all(jnp.isfinite(trait.qr_diagonal) & (trait.qr_diagonal != 0))
     targets = jnp.where(valid_basis, trait.targets, jnp.nan)
     inputs = TrainingEpisode(trait.observations[:, None], *features, targets)
-    return StructuredEpisode(inputs, context, draw_key)
+    return StructuredEpisode(inputs, context, queries, draw_key)
 
 
 @partial(jax.jit, static_argnames=("length", "k"))
@@ -80,11 +88,52 @@ def structured_draws(context_factor, key, first, *, length, k):
 
 @partial(jax.jit, static_argnames=("n", "q"))
 def structured_calibration_targets(key, spectrum, *, n, q):
-    keys = jax.random.split(key, 128)
-    return jax.lax.map(
-        lambda sample_key: simulate_trait(sample_key, spectrum, n=n, c=0, q=q).targets,
-        keys,
+    variance_key, coefficient_key, direction_key = jax.random.split(key, 3)
+    count, dtype = STRUCTURED_CALIBRATION_EPISODES, spectrum.dtype
+    genetic = jnp.exp2(
+        jax.random.uniform(
+            variance_key,
+            (count,),
+            dtype,
+            minval=LOG2_VARIANCE_BOUNDS[0],
+            maxval=LOG2_VARIANCE_BOUNDS[1],
+        )
     )
+    coefficients = jax.random.normal(coefficient_key, (count, spectrum.size), dtype)
+    radius = jnp.sqrt(genetic * jnp.sum(spectrum * coefficients**2, axis=1))
+    # A Haar basis rotates each coefficient vector to a uniform direction at fixed radius.
+    direction = jax.random.normal(direction_key, (count, n), dtype)
+    return direction[:, :q] * (radius / jnp.linalg.norm(direction, axis=1))[:, None]
+
+
+def _episode_batch_gradient(loss, models, keys, microbatch_size):
+    """Differentiate the batch mean with a bounded episode axis."""
+    batch_size = keys.shape[0]
+
+    def group_loss(models, group):
+        if microbatch_size == 1:
+            return loss(models, group[0])
+        return jax.vmap(loss, in_axes=(None, 0))(models, group).sum()
+
+    group_gradient = eqx.filter_value_and_grad(group_loss)
+
+    def accumulate(carry, group):
+        total_loss, total_grads = carry
+        value, grads = group_gradient(models, group)
+        return (total_loss + value, jax.tree.map(jnp.add, total_grads, grads)), None
+
+    if microbatch_size == batch_size:
+        value, grads = group_gradient(models, keys)
+    else:
+        group_count, remainder = divmod(batch_size, microbatch_size)
+        end = group_count * microbatch_size
+        groups = keys[:end].reshape(group_count, microbatch_size)
+        zeros = jax.tree.map(jnp.zeros_like, eqx.filter(models, eqx.is_inexact_array))
+        totals, _ = jax.lax.scan(accumulate, (jnp.float32(0), zeros), groups)
+        if remainder:
+            totals, _ = accumulate(totals, keys[end:])
+        value, grads = totals
+    return value / batch_size, jax.tree.map(lambda grad: grad / batch_size, grads)
 
 
 def make_train_chunk(optimizer, args, spectrum=None):
@@ -141,24 +190,10 @@ def make_train_chunk(optimizer, args, spectrum=None):
                 )
                 return episode_loss(models, episode.inputs, draws)
 
-            loss_and_grad = eqx.filter_value_and_grad(structured_loss)
-
-            def accumulate(carry, key):
-                total_loss, total_grads = carry
-                loss, grads = loss_and_grad(models, key)
-                return (
-                    total_loss + loss,
-                    jax.tree.map(jnp.add, total_grads, grads),
-                ), None
-
-            # Accumulate on-device so attention activations fit one episode at a time.
-            zeros = jax.tree.map(
-                jnp.zeros_like, eqx.filter(models, eqx.is_inexact_array)
-            )
             keys = jax.random.split(episode_key, args.batch_size)
-            (loss, grads), _ = jax.lax.scan(accumulate, (jnp.float32(0), zeros), keys)
-            loss /= args.batch_size
-            grads = jax.tree.map(lambda grad: grad / args.batch_size, grads)
+            loss, grads = _episode_batch_gradient(
+                structured_loss, models, keys, args.episode_microbatch_size
+            )
         updates, opt_state = optimizer.update(grads, opt_state)
         models = eqx.apply_updates(models, updates)
         leaves = jax.tree.leaves(eqx.filter((grads, models, opt_state), eqx.is_array))
@@ -204,7 +239,7 @@ def make_train_chunk(optimizer, args, spectrum=None):
 def evaluate(models, test_key, args, stored_split=None, spectrum=None):
     update, predictor = models
     if stored_split is None and spectrum is None:
-        sample = jax.jit(sample_episode, static_argnums=(1, 2, 3))
+        sample = jax.jit(sample_episode_with_factors, static_argnums=(1, 2, 3))
     rows = []
     grid = checkpoints(args.t_max, args.eval_multiplier)
     for episode_index in range(args.test_episodes):
@@ -216,6 +251,11 @@ def evaluate(models, test_key, args, stored_split=None, spectrum=None):
                 episode_key, spectrum, n=args.n, c=args.context_count, q=args.queries
             )
             episode = structured.inputs
+            context_factor, query_factor = (
+                structured.context_factor,
+                structured.query_factor,
+            )
+            observations, targets = episode.observations, episode.targets
             probe = structured_draws(
                 structured.context_factor, probe_key, jnp.uint32(0), length=32, k=args.k
             )
@@ -223,12 +263,32 @@ def evaluate(models, test_key, args, stored_split=None, spectrum=None):
             episode_key, diagnostic_key = jax.random.split(
                 jax.random.fold_in(test_key, episode_index)
             )
-            episode = sample(
+            episode, context_factor, query_factor = sample(
                 episode_key, args.context_count, args.features, args.queries
             )
+            observations, targets = episode.y, episode.targets
         else:
-            episode = jax.device_put(stored_split.episode(episode_index))
+            episode, context_factor, query_factor = jax.device_put(
+                stored_split.episode_with_factors(episode_index)
+            )
+            observations, targets = episode.observations, episode.targets
             probe = jax.device_put(stored_split.draws(episode_index, probe=True))
+        oracle_nll, identity_nll = map(
+            float,
+            jax.device_get(
+                paired_bar_scores(
+                    predictor.distribution,
+                    context_factor,
+                    query_factor,
+                    observations[:, 0],
+                    targets,
+                )
+            ),
+        )
+        if not np.isfinite((oracle_nll, identity_nll)).all():
+            raise ValueError(
+                f"nonfinite Gaussian reference scores at episode {episode_index}"
+            )
         carry = update.initial_state(args.context_count)
         previous = 0
         for target in grid:
@@ -274,6 +334,10 @@ def evaluate(models, test_key, args, stored_split=None, spectrum=None):
                     "nll": nll,
                     "state_norm": state_norm,
                     "mean_drift_norm": drift_norm,
+                    "oracle_nll": oracle_nll,
+                    "identity_nll": identity_nll,
+                    "nll_above_oracle": nll - oracle_nll,
+                    "identity_minus_oracle": identity_nll - oracle_nll,
                 }
             )
             previous = target
@@ -302,11 +366,25 @@ def write_evaluation(output, rows, t_max, bootstrap_seed):
     for step, prefix_rows in sorted(by_prefix.items()):
         scores = np.array([row["nll"] for row in prefix_rows])
         differences = (scores - training_prefix)[samples].mean(axis=1)
+        oracle = np.array([row["oracle_nll"] for row in prefix_rows])
+        identity = np.array([row["identity_nll"] for row in prefix_rows])
+        oracle_gap = scores - oracle
+        kernel_gap = identity - oracle
         summary.append(
             {
                 "t": step,
                 "draw_count": prefix_rows[0]["draw_count"],
                 "nll": float(scores.mean()),
+                "oracle_nll": float(oracle.mean()),
+                "identity_nll": float(identity.mean()),
+                "nll_above_oracle": float(oracle_gap.mean()),
+                "identity_minus_oracle": float(kernel_gap.mean()),
+                "nll_above_oracle_ci95": np.percentile(
+                    oracle_gap[samples].mean(axis=1), [2.5, 97.5]
+                ).tolist(),
+                "identity_minus_oracle_ci95": np.percentile(
+                    kernel_gap[samples].mean(axis=1), [2.5, 97.5]
+                ).tolist(),
                 "change_from_t_max_ci95": np.percentile(
                     differences, [2.5, 97.5]
                 ).tolist(),
@@ -320,6 +398,12 @@ def write_evaluation(output, rows, t_max, bootstrap_seed):
         [row["nll"] for row in summary],
         "o-",
         label="Axial proposal",
+    )
+    ax.axhline(
+        summary[0]["oracle_nll"], linestyle="--", color="C1", label="Oracle bar floor"
+    )
+    ax.axhline(
+        summary[0]["identity_nll"], linestyle=":", color="C2", label="K = I plug-in"
     )
     ax.axvline(t_max, color="0.5", linestyle="--", label="Training horizon")
     ax.set(xscale="log", xlabel="Update steps", ylabel="Held-out PFN NLL")
@@ -337,7 +421,11 @@ def parse_args(argv=None):
     parser.add_argument("--axial-depth", type=int, default=1)
     parser.add_argument("--history-capacity", type=int, default=3)
     parser.add_argument("--query-depth", type=int, default=3)
-    parser.add_argument("--attention-backend", choices=("xla", "cudnn"), default="xla")
+    parser.add_argument(
+        "--attention-backend",
+        choices=("xla", "cudnn"),
+        help="defaults to cuDNN for structured runs on CUDA and XLA otherwise",
+    )
     parser.add_argument(
         "--readout",
         choices=("alternating", "no-context-last-context"),
@@ -350,6 +438,11 @@ def parse_args(argv=None):
     parser.add_argument("--steps", type=int, default=10000)
     parser.add_argument("--peak-learning-rate", type=float, default=0.005)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--episode-microbatch-size",
+        type=int,
+        help="episodes processed together in structured mode (default full batch with cuDNN, one with XLA)",
+    )
     parser.add_argument("--test-episodes", type=int)
     parser.add_argument("--t-max", type=int, default=32)
     parser.add_argument("--eval-multiplier", type=int, default=16)
@@ -408,6 +501,11 @@ def parse_args(argv=None):
         parser.error(
             "require at least three training updates and two blocks per training rollout"
         )
+    if args.episode_microbatch_size is not None:
+        if not args.structured:
+            parser.error("--episode-microbatch-size requires --structured")
+        if args.episode_microbatch_size > args.batch_size:
+            parser.error("--episode-microbatch-size must be at most --batch-size")
     if args.width % args.heads:
         parser.error("--heads must divide --width")
     if args.structured and (
@@ -473,6 +571,17 @@ def run(args):
         dataset, train_split, eval_split = _open_dataset(args)
     elif args.structured:
         spectrum = jnp.asarray(power_law_eigenvalues(args.n, args.features, args.alpha))
+    device = jax.devices()[0]
+    if args.attention_backend is None:
+        cuda = (
+            device.platform == "gpu"
+            and "cuda" in device.client.platform_version.lower()
+        )
+        args.attention_backend = "cudnn" if args.structured and cuda else "xla"
+    if args.structured and args.episode_microbatch_size is None:
+        args.episode_microbatch_size = (
+            args.batch_size if args.attention_backend == "cudnn" else 1
+        )
     args.output_dir.mkdir(parents=True, exist_ok=False)
     bins, init, train, test, bootstrap = jax.random.split(jax.random.key(args.seed), 5)
     if spectrum is not None:
@@ -532,7 +641,6 @@ def run(args):
     optimizer = optax.adam(learning_rate)
     params = eqx.filter(models, eqx.is_inexact_array)
     opt_state = optimizer.init(params)
-    device = jax.devices()[0]
     metadata = vars(args) | {
         "output_dir": str(args.output_dir),
         "dataset": str(args.dataset) if dataset is not None else None,
@@ -547,6 +655,7 @@ def run(args):
         "query_decoder": type(predictor.decoder).__name__,
         "context_width": predictor.encoder.context_width,
         "bin_edges": edges,
+        "reference_variance_grid_points_per_axis": VARIANCE_GRID_SIZE,
         "time_slices": args.history_capacity + 1,
         "parameter_count": sum(leaf.size for leaf in jax.tree.leaves(params)),
         "learning_rate_schedule": rate_metadata,
@@ -570,6 +679,8 @@ def run(args):
             population_size=args.n,
             spectral_rank=args.features,
             training_episodes=args.steps * args.batch_size,
+            calibration_episodes=STRUCTURED_CALIBRATION_EPISODES,
+            calibration_targets=STRUCTURED_CALIBRATION_EPISODES * args.queries,
             episode_order="fresh independent draws per optimizer step",
         )
     (args.output_dir / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")

@@ -1,8 +1,10 @@
+import csv
 import json
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from experiments.attention_proposal import run as runner
 from experiments.modular_bayes import run as legacy
@@ -172,12 +174,22 @@ def test_structured_online_runner_uses_no_dataset_or_legacy_simulation(
     for name in (
         "SimulationDataset",
         "sample_episode",
+        "sample_episode_with_factors",
         "prior_bin_edges",
         "_step_draws",
     ):
         monkeypatch.setattr(runner, name, forbid)
 
     output = tmp_path / "online-run"
+    baselines = runner.paired_bar_scores
+    scored_episodes = []
+
+    def score_once(*args):
+        scores = baselines(*args)
+        scored_episodes.append(scores)
+        return scores
+
+    monkeypatch.setattr(runner, "paired_bar_scores", score_once)
     defaults = runner.parse_args(["--structured", "--output-dir", str(output)])
     assert (defaults.n, defaults.features, defaults.context_count) == (512, 128, 504)
     runner.main(
@@ -195,11 +207,15 @@ def test_structured_online_runner_uses_no_dataset_or_legacy_simulation(
             "--k",
             "2",
             "--batch-size",
+            "3",
+            "--episode-microbatch-size",
             "2",
             "--eval-multiplier",
             "2",
             "--chunk-size",
             "1",
+            "--test-episodes",
+            "2",
         ]
     )
     metadata = json.loads((output / "run.json").read_text())
@@ -208,9 +224,60 @@ def test_structured_online_runner_uses_no_dataset_or_legacy_simulation(
         metadata["spectral_rank"],
         metadata["alpha"],
     ) == (8, 3, 1.5)
-    assert metadata["training_episodes"] == 6
+    assert metadata["training_episodes"] == 9
+    assert metadata["calibration_episodes"] == 1024
+    assert metadata["calibration_targets"] == 2048
+    assert metadata["episode_microbatch_size"] == 2
+    assert metadata["attention_backend"] == "xla"
     training = np.loadtxt(output / "training.csv", delimiter=",", skiprows=1)
     episodes = np.loadtxt(output / "episodes.csv", delimiter=",", skiprows=1)
     assert training.shape == (3, 2)
-    np.testing.assert_array_equal(episodes[:, 1:3], [[1, 2], [2, 4], [4, 8]])
+    np.testing.assert_array_equal(episodes[:, 1:3], [[1, 2], [2, 4], [4, 8]] * 2)
     assert np.isfinite(training).all() and np.isfinite(episodes).all()
+    assert len(scored_episodes) == 2
+    with (output / "episodes.csv").open() as file:
+        rows = list(csv.DictReader(file))
+    for row in rows:
+        oracle, identity = map(float, scored_episodes[int(row["episode"])])
+        assert float(row["oracle_nll"]) == oracle
+        assert float(row["identity_nll"]) == identity
+        assert float(row["nll_above_oracle"]) == float(row["nll"]) - oracle
+        assert float(row["identity_minus_oracle"]) == identity - oracle
+    summary = json.loads((output / "summary.json").read_text())
+    final_rows = [row for row in rows if row["t"] == "4"]
+    for key in (
+        "oracle_nll",
+        "identity_nll",
+        "nll_above_oracle",
+        "identity_minus_oracle",
+    ):
+        assert summary[-1][key] == np.mean([float(row[key]) for row in final_rows])
+
+
+def test_structured_calibration_uses_eight_times_as_many_episodes():
+    draws = runner.structured_calibration_targets(
+        jax.random.key(1), jnp.array([8.0]), n=8, q=2
+    )
+    assert draws.shape == (1024, 2)
+    assert np.isfinite(draws).all()
+
+
+@pytest.mark.parametrize("microbatch_size", [1, 2, 5])
+def test_episode_microbatches_preserve_batch_mean_and_gradient(microbatch_size):
+    keys = jax.random.split(jax.random.key(4), 5)
+    weights = jnp.array([0.5, -0.25])
+
+    def loss(weights, key):
+        target = jax.random.normal(key, (2,))
+        return jnp.sum((weights - target) ** 2)
+
+    actual = jax.jit(
+        lambda weights, keys: runner._episode_batch_gradient(
+            loss, weights, keys, microbatch_size
+        )
+    )(weights, keys)
+    expected = jax.value_and_grad(
+        lambda weights: jnp.stack([loss(weights, key) for key in keys]).mean()
+    )(weights)
+    for value, reference in zip(actual, expected, strict=True):
+        np.testing.assert_allclose(value, reference, rtol=1e-6, atol=1e-6)

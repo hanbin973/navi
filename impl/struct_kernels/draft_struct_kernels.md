@@ -189,15 +189,52 @@ on an allocated compute node.
 
 ```sh
 uv run --locked --no-sync python -m experiments.attention_proposal.run \
-  --structured --alpha 1.5 --steps 10000 --batch-size 32 \
-  --output-dir runs/spectral-online-a1p5
+  --structured --alpha 1.0 --steps 10000 --batch-size 32 \
+  --output-dir runs/spectral-online-a1p0
 ```
 
-JAX samples episodes and accumulates the batch gradient on the device. The
-optimizer updates once per batch and training metrics return to the host in
-chunks of 100 updates. Held-out episodes and diagnostic draws use separate
-keys. `--n`, `--m`, `--alpha`, `--context-count`, and `--queries` control the
-simulation. The `--dataset` path below remains available for replay.
+Structured runs on CUDA default to cuDNN attention and process all episodes
+in an optimizer batch in parallel. Use `--episode-microbatch-size` to limit
+the number of concurrent episodes if memory is constrained. The runner
+accumulates microbatch gradients on the device and still takes one optimizer
+step for the full batch. Structured runs using XLA default to one episode
+at a time and accept the same override. `--attention-backend` can select
+either implementation explicitly.
+
+Training metrics return to the host in chunks of 100 updates. Held-out
+episodes and diagnostic draws use separate keys. `--n`, `--m`, `--alpha`,
+`--context-count`, and `--queries` control the simulation. The `--dataset`
+path below remains available for replay.
+
+Online structured calibration uses 1,024 independent prior episodes, up
+from 128. With eight queries this yields 8,192 scalar calibration targets.
+It samples the same Haar-basis target law by drawing the coefficient norm
+and a uniform population direction, which avoids QR during calibration.
+
+## Paired Gaussian evaluation
+
+Each held-out episode is scored once with two Gaussian references. Both
+use the run's bar edges, its context observations, and its latent query
+targets. The oracle conditions on the selected factors. It diagonalizes
+$F_C^\top F_C$ once and uses the rotated query factors to obtain the
+posterior marginal means and variances in $O(m+qm)$ per variance point.
+It averages Gaussian bar probabilities over a $32\times32$ midpoint grid
+in the independent log-base-2 variance priors, weighting each point by
+the context marginal likelihood. Integrating the bars costs an additional
+$O(qB)$ per point for $B$ bars.
+
+The identity reference fits $K=I$ using the same variance prior. Its
+likelihood depends on the sum of genetic and residual variances. The
+plug-in uses the posterior mean genetic variance for a zero-mean latent
+query Gaussian. The oracle instead integrates variance uncertainty, so
+the identity-to-oracle gap includes the effect of the plug-in.
+
+The reference columns in `episodes.csv` repeat across prefixes for each
+episode. `nll_above_oracle` is model NLL minus oracle NLL, and
+`identity_minus_oracle` is identity NLL minus oracle NLL. Both gaps have
+paired episode bootstrap intervals in `summary.json`. `prefix_nll.png`
+shows both reference levels. The oracle floor is an expected bar NLL,
+so an individual episode's realized gap can be negative.
 
 ## Offline generation and replay
 
@@ -209,12 +246,12 @@ again.
 
 ```sh
 uv run --locked --no-sync python -m experiments.attention_proposal.generate_data \
-  --output-dir runs/spectral-a1p5-data --n 512 --m 128 --alpha 1.5 \
+  --output-dir runs/spectral-a1p0-data --n 512 --m 128 --alpha 1.0 \
   --k 4 --train-horizon 4 --eval-horizon 8 \
   --train-episodes 8 --validation-episodes 2 --test-episodes 2
 
 uv run --locked --no-sync python -m experiments.attention_proposal.run \
-  --dataset runs/spectral-a1p5-data --output-dir runs/spectral-a1p5-run \
+  --dataset runs/spectral-a1p0-data --output-dir runs/spectral-a1p0-run \
   --t-max 4 --eval-multiplier 2 --steps 6 --batch-size 1
 ```
 
@@ -230,6 +267,20 @@ before writing data. At the default episode counts and rollout lengths,
 the estimated array payload is about 5.8 GiB.
 
 ## Verification record
+
+The paired reference implementation passed all 62 CPU tests, including
+dense Gaussian checks for the posterior, grid integration and identity
+plug-in. Slurm job `66669400` verified 8,192 calibration targets and both
+reference scores on an NVIDIA A40 at $n=512$, $m=128$, and $\alpha=1.5$.
+The local results are under
+`runs/structured-kernel-pilot-20261123/oracle-n512-c504-verified`.
+
+Slurm job `66669335` selected cuDNN automatically on an NVIDIA A40. It
+completed three optimizer updates with all 32 episodes batched together,
+at $n=512$, 504 context rows, $m=128$, and the 32-block training horizon.
+Training and held-out metrics were finite. JAX reported 22.5 GiB of peak
+device memory in use. The local artifacts are under
+`runs/structured-kernel-pilot-20261123/cudnn-batch32-n512`.
 
 The online path passed all 55 CPU tests. Slurm job `66669304` ran online
 generation on an NVIDIA A40 at $n=512$, $m=128$, and $\alpha=1.5$. Three

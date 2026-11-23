@@ -10,6 +10,8 @@ from jax import Array
 
 from .helper import DatasetSimulator, QueryContextKernel
 
+LOG2_VARIANCE_BOUNDS = (-2.0, 2.0)
+
 
 class SpectralFactors(NamedTuple):
     """Orthonormal population eigenvectors and positive eigenvalues."""
@@ -99,7 +101,11 @@ def simulate_trait(key: Array, eigenvalues: Array, *, n: int, c: int, q: int):
     selection = jax.random.permutation(selection_key, n).astype(jnp.int32)
     context, queries = selection[:c], selection[c : c + q]
     variances = 2 ** jax.random.uniform(
-        variance_key, (2,), eigenvalues.dtype, minval=-2, maxval=2
+        variance_key,
+        (2,),
+        eigenvalues.dtype,
+        minval=LOG2_VARIANCE_BOUNDS[0],
+        maxval=LOG2_VARIANCE_BOUNDS[1],
     )
     simulator = SpectralDatasetSimulator(factors, variances[0], variances[1])
     targets, observations = simulator.sample(trait_key, context, queries)
