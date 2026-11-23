@@ -87,23 +87,24 @@ class AbstractAttentionBias(eqx.Module):
 
 
 class AbstractPooling(eqx.Module):
-    """Map exchangeable draws to features with a fixed output width."""
+    """Summarize exchangeable draws conditioned on prefix features."""
 
     output_width: eqx.AbstractVar[int]
 
     @abstractmethod
-    def __call__(self, draws: Array) -> Array:
-        """Map float32 draws [N, K] to float32 features [N, output_width].
+    def __call__(self, draws: Array, prefix_features: Array) -> Array:
+        """Pool float32 draws [N, K] using prefix features [N, output_width].
 
-        The output is invariant to draw-column permutations and equivariant
-        to context-row permutations, up to floating-point roundoff.
+        Return float32 features [N, output_width]. The output is invariant
+        to draw-column permutations and equivariant to common row
+        permutations of both inputs, up to floating-point roundoff.
         """
         raise NotImplementedError
 
 
 @final
 class MeanPooling(AbstractPooling):
-    """Mean-pool whole draws with learned scores shared across context rows."""
+    """Mean-pool whole draws with scores conditioned on the prefix features."""
 
     output_width: int = eqx.field(static=True)
     scorer: _MLP
@@ -112,14 +113,27 @@ class MeanPooling(AbstractPooling):
         if type(width) is not int or width < 1:
             raise ValueError("pool output width must be a positive integer")
         self.output_width = width
-        self.scorer = _MLP(1, width, width, bias=True, zero_init=False, key=key)
+        self.scorer = _MLP(width + 1, width, width, bias=True, zero_init=False, key=key)
 
-    def __call__(self, draws: Array) -> Array:
+    def __call__(self, draws: Array, prefix_features: Array) -> Array:
         if draws.ndim != 2 or not all(draws.shape):
             raise ValueError("draws must have shape [N, K] with positive N and K")
         if draws.dtype != jnp.float32:
             raise TypeError("draws must have dtype float32")
-        row_scores = jax.vmap(jax.vmap(self.scorer))(draws[..., None])
+        expected_shape = (draws.shape[0], self.output_width)
+        if prefix_features.shape != expected_shape:
+            raise ValueError(
+                f"prefix_features must have shape {expected_shape}, "
+                f"got {prefix_features.shape}"
+            )
+        if prefix_features.dtype != jnp.float32:
+            raise TypeError("prefix_features must have dtype float32")
+
+        prefix_by_draw = jnp.broadcast_to(
+            prefix_features[:, None, :], (*draws.shape, self.output_width)
+        )
+        scorer_inputs = jnp.concatenate((draws[..., None], prefix_by_draw), axis=-1)
+        row_scores = jax.vmap(jax.vmap(self.scorer))(scorer_inputs)
         scores = row_scores.mean(axis=0)
         return (draws @ scores) / draws.shape[1]
 
@@ -211,7 +225,9 @@ class AxialAttentionProposal(AbstractProposal):
     """Propose one candidate using L - 1 committed states and a fresh block.
 
     Each of the ``depth`` axial layers applies causal temporal attention
-    followed by context-row attention. The proposal reads the last slice.
+    followed by context-row attention. The stack reads L - 1 committed
+    states and a final observation slice. Its last output conditions draw
+    pooling, and the proposal projects both the prefix and pooled draws.
 
     Args:
         state_width: Committed embedding and candidate width D.
@@ -280,7 +296,7 @@ class AxialAttentionProposal(AbstractProposal):
             for layer_key in jax.random.split(layers_key, depth)
         )
         self.output_projection = eqx.nn.Linear(
-            width, state_width, dtype=jnp.float32, key=output_key
+            2 * width, state_width, dtype=jnp.float32, key=output_key
         )
 
     def __check_init__(self):
@@ -302,13 +318,11 @@ class AxialAttentionProposal(AbstractProposal):
         )
         return jnp.where(valid[:, None, None], mixed, 0)
 
-    def __call__(self, history, valid, draws, observations):
+    def _encode_prefix(self, history, valid, observations):
         history = jnp.where(valid[:, None, None], history, 0)
         past = jax.vmap(jax.vmap(self.history_projection))(history)
-        fresh = self.pooling(draws) + jax.vmap(self.observation_projection)(
-            observations
-        )
-        tokens = jnp.concatenate((past, fresh[None]), axis=0)
+        observed = jax.vmap(self.observation_projection)(observations)
+        tokens = jnp.concatenate((past, observed[None]), axis=0)
         valid = jnp.concatenate((valid, jnp.ones((1,), dtype=bool)))
         mask = self._temporal_mask(valid)
 
@@ -318,7 +332,13 @@ class AxialAttentionProposal(AbstractProposal):
 
         temporal, context = self.layers[-1]
         tokens = self._mix_time(temporal, tokens, mask, valid)
-        return jax.vmap(self.output_projection)(context(tokens[-1]))
+        return context(tokens[-1])
+
+    def __call__(self, history, valid, draws, observations):
+        prefix_features = self._encode_prefix(history, valid, observations)
+        pooled_draws = self.pooling(draws, prefix_features)
+        features = jnp.concatenate((prefix_features, pooled_draws), axis=-1)
+        return jax.vmap(self.output_projection)(features)
 
 
 class AbstractIntegrator(eqx.Module):

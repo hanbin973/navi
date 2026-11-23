@@ -2,153 +2,110 @@
 
 **Branch** `attention-update`
 
-**Status** Implemented and verified on CPU. CUDA results are recorded below.
+**Status** Prefix-conditioned revision implemented and verified on CPU.
 
-The [design draft](draft_attn_proposal.md) selects Deep Sets with mean pooling
-for fresh joint draws, followed by temporal attention over committed states
-and plain context-row attention. This plan covers the library and its tests.
-Callers opt in by constructing `BayesUpdate` with `AxialAttentionProposal`.
-Learned-query pooling and matched training experiments are follow-up work.
+The [design draft](draft_attn_proposal.md) moves the axial stack ahead of
+Deep Sets mean pooling. The stack reads the retained states and observations.
+Its last hidden state conditions draw scoring. The proposal then combines
+that hidden state and the pooled evidence to produce one candidate. The
+existing draw-first proposal is the comparison baseline for this revision.
 Run commands from `/home/hblee/research/navi` using the
 [locked uv environment](../../harness/environment.md).
 
-## 1. Implement the pool and its contract
+## 1. Condition the mean pool on prefix features
 
-**State** Complete. Pool contract tests passed.
+**State** Complete. Pool contract tests passed on CPU.
 
-In [`navi/bayes_update.py`](../../navi/bayes_update.py), add `AbstractPooling`
-and final `MeanPooling` using the
-[Equinox module pattern](../../harness/pattern/equinox.md). Declare
-`output_width: eqx.AbstractVar[int]` and abstract `__call__(draws) -> Array`.
-The pool maps float32 `[N, K]` to float32 `[N, W]` for at least one row and
-one draw. Draw columns are exchangeable and output context rows stay aligned
-to input rows. Validate the positive output width at construction.
+In [`navi/bayes_update.py`](../../navi/bayes_update.py), change
+`AbstractPooling.__call__` to take `draws` and `prefix_features`. Keep
+`output_width` as the declared feature width. Require aligned float32
+arrays of shape `[N, K]` and `[N, W]` with positive row and draw counts,
+where `W` equals `output_width`. The result is float32 `[N, W]`.
 
-`MeanPooling(width, key=...)` owns a shared float32 MLP. Use `_MLP` from
-[`navi/blocks.py`](../../navi/blocks.py) with a width-`W` hidden layer and
-width-`W` output. The shape flow is:
+Change the first layer of the shared scoring network in `MeanPooling`
+to accept `W + 1` features. Reuse the existing `_MLP` with hidden and output
+width `W`.
 
-1. Add a scalar feature axis to the original draw matrix `[N, K]` to obtain
-   `[N, K, 1]`. Map the same MLP across rows and draws to get `[N, K, W]`.
-2. Take the mean over context axis `0` to get `scores [K, W]`. Every draw
-   gets one score per learned output slot.
-3. Return `draws @ scores / K` with shape `[N, W]`. This is a signed
-   arithmetic mean of learned contributions. Each output slot uses the same
-   draw mixture across all context rows.
+1. Add a feature axis to the draws to obtain `[N, K, 1]`. Broadcast the
+   prefix features to `[N, K, W]` and concatenate them with the draws to
+   obtain `[N, K, W + 1]`.
+2. Map the same scorer across context rows and draws to obtain `[N, K, W]`.
+   Average over context rows to get `[K, W]`, with one score per draw and
+   output slot.
+3. For each slot, multiply each original draw column by that draw's score
+   for the slot. Sum the scored columns and divide by the number of draws.
+   Use a matrix product for the sum and return `[N, W]`.
 
-Add pool tests to [`tests/test_bayes_update.py`](../../tests/test_bayes_update.py).
-With controlled scorer weights, verify the matrix product against an explicit
-sum, including signed scores, all-ones scores, and `K=1`. In the two-row
-alignment fixture, a slot that scores by context mean returns `(1, 1)` for
-draws `(1, 1), (-1, -1)` and `(0, 0)` for draws `(1, -1), (-1, 1)`. Verify
-these results, draw-column invariance, context-row equivariance, output shape
-and dtype, and a jitted call. Set explicit scorer parameters in the test
-fixture so the assertions exercise the concrete pool.
+Update the pool tests in
+[`tests/test_bayes_update.py`](../../tests/test_bayes_update.py). Use
+controlled weights to check the scored mean against an explicit sum.
+Exercise signed scores and a single draw. Show that fixed draws can yield
+different pooled features when the prefix changes. Retain the joint
+alignment fixture by setting the scorer weights on prefix features to zero
+for that fixture. Check draw-order invariance at fixed prefix, context-row
+equivariance under a common row permutation of both inputs, and shape and
+dtype under JIT. Check rejection of misaligned or wrong-width prefix inputs.
 
 ```sh
 JAX_PLATFORMS=cpu uv run --locked pytest -q tests/test_bayes_update.py -k mean_pooling
 ```
 
-## 2. Add boolean masks to the shared attention path
+## 2. Run axial attention on history and observations
 
-**State** Complete. Mask and PFNs parity tests passed.
+**State** Complete. Axial proposal and integration tests passed on CPU.
 
-In `navi/blocks.py`, add optional keyword-only `mask=None` to `_Block`
-and `_Attention`. Pass the mask through both pre-norm and post-norm paths to
-`jax.nn.dot_product_attention`. Keep the existing XLA backend and additive
-bias argument. The temporal proposal supplies a boolean mask where `True`
-allows a query-key pair.
+In `AxialAttentionProposal`, form an `[L, N, W]` stack from the
+`L - 1` projected committed states and one projected observation slice.
+Mark the last slice valid. Reuse the causal validity mask and startup
+handling. Each axial layer applies temporal attention followed by context-row
+attention. Keep the full grid for intermediate layers and run the last
+context block on the observation slice. Its `[N, W]` result is the prefix
+representation.
 
-In [`tests/test_pfn_port.py`](../../tests/test_pfn_port.py), cover a small
-rectangular mask through both normalization paths. Compare a query with an
-excluded key against the same query evaluated with only the allowed keys.
-Run the existing initialization, additive-bias, pinned forward, and gradient
-checks against the same module and fixtures.
+Pass the proposal's original `[N, K]` draw block and this prefix representation
+to `self.pooling`. Concatenate the prefix representation and pooled evidence
+along the feature axis to obtain `[N, 2W]`. Resize the output projection to
+map those features to a raw candidate of shape `[N, D]`. The updater still
+passes the candidate to the existing integrator and commits one snapshot per
+block.
 
-```sh
-JAX_PLATFORMS=cpu uv run --locked pytest -q tests/test_pfn_port.py
-```
-
-## 3. Compose the axial proposal
-
-**State** Complete. Axial proposal tests passed.
-
-Add final `AxialAttentionProposal(state_width, width, heads, *,
-history_capacity, pre_norm, key, pooling=None, depth=1)` in `navi/bayes_update.py`.
-Reuse `AbstractProposal` and the existing `[N, K]` proposal boundary. Validate
-the proposed constructor dimensions, positive depth, the boolean normalization
-option, head divisibility, and agreement between `pooling.output_width` and
-`width`.
-Store the injected pool or initialize `MeanPooling(width, key=pool_key)`.
-Split the constructor key for the pool, projections, and each axial layer's
-two `_Block` instances. Store a fixed stack of temporal/context block pairs
-with independently initialized parameters. Keep arrays as PyTree leaves
-and use static fields for structural dimensions and options.
-
-For a history of size `H`, form a stack with `L = H + 1` time slices:
-
-1. Zero invalid `[H, N, D]` entries before applying the shared `D → W`
-   projection. Form the fresh `[N, W]` token by adding the pool output to
-   the projection of observations `[N, 1]`. Append it to obtain `[L, N, W]`
-   and append `True` to the `[H]` validity vector.
-2. In each axial Transformer layer, apply a shared temporal `_Block` over
-   length `L`, mapped over the `N` context rows. Build a `[1, 1, L, L]` mask
-   from the validity vector and a
-   lower triangle. A valid query admits only valid keys at or before its
-   position. Each invalid query admits only its own diagonal entry, keeping
-   softmax defined. Zero the corresponding outputs after the block. Follow
-   the draft's position-free design.
-3. Complete each layer with a shared context `_Block` mapped over the `L`
-   time slices. Zero the invalid slices and pass the full `[L, N, W]` grid
-   to the next layer. In the final layer, the context block can run on the
-   fresh `[N, W]` slice alone because its computation is independent of the
-   other slices. Project that result `W → D` to return one float32 `[N, D]`
-   candidate to the existing integrator.
-
-Export `AbstractPooling`, `MeanPooling`, and `AxialAttentionProposal` in
-[`navi/__init__.py`](../../navi/__init__.py). Extend `tests/test_bayes_update.py`
-with a deterministic injected pool and a width mismatch check. Compare
-the final-layer fresh-slice shortcut with all-slice mixing for depths one
-and two. Perturb a later valid slice while checking earlier outputs across
-both blocks at each layer, and perturb invalid history
-while checking finite equal candidates and zero gradients on padded entries.
-Check that a valid older snapshot affects the candidate with the latest state
-and fresh evidence held fixed. Include the startup case where the initialized
-zero snapshot is valid and observations reach the fresh token through their
-own projection.
+Update the full-grid reference and injected-pool tests. Check depth one and
+two, causal isolation, inert startup padding, and equality of the
+observation-slice shortcut with processing every time slice. Hold history
+and observations fixed and vary the draws to check that the prefix
+representation is identical. Use a deterministic prefix-sensitive pool and
+an output projection that reads pooled features to show that a change in
+observations at startup, or a change in an older valid snapshot later, can
+affect the candidate through pooling.
 
 ```sh
 JAX_PLATFORMS=cpu uv run --locked pytest -q tests/test_bayes_update.py tests/test_pfn_port.py
 ```
 
-## 4. Verify rollout integration and compatibility
+The two-input pooling call changes the contract for custom axial pools.
+Update any in-repository implementations and callers when making the change.
+The scorer input and candidate projection have new parameter shapes. Use
+fresh axial initialization and the previous revision for replaying draw-first
+checkpoints. The original single-snapshot `AttentionProposal` and the shared
+attention mask interface retain their existing signatures.
+
+## 3. Verify rollout integration
 
 **State** Complete under the CPU acceptance gate.
 
-Exercise the new proposal through `BayesUpdate.step`, `advance_chunk`, and
-[`rollout_loss`](../../navi/training.py). The existing updater already commits
-one state per block, advances the absolute block count, and accumulates the
-draw count. Its carry layout and the predictor's snapshot interface support
-the new proposal through the existing entry points. The one-snapshot
-`AttentionProposal` and its bias options remain available to existing callers.
+Run the existing single-draw and multi-draw rollout checks through
+`BayesUpdate.step`, `advance_chunk`, and
+[`rollout_loss`](../../navi/training.py). Check the full carry across startup,
+rollover and chunk boundaries. Check joint draw-column invariance, context-row
+equivariance, invariance of predictor logits under aligned context
+permutations, and agreement between batched prefix loss and manual scoring.
+Check that late-prefix loss sends finite, nonzero gradients through early
+draws, the pool, the axial stack, and the predictor. Update the
+[repository map](../../harness/repository-map.md) if the implementation
+changes recorded responsibilities.
 
-Extend the rollout fixtures in `tests/test_bayes_update.py` to check:
-
-- Full and chunked scans match across startup and rollover, including the
-  history, validity, step count, and draw count. Exercise single draws and
-  multi-draw blocks.
-- Joint row permutations permute candidates and committed embeddings. Query
-  logits match after aligning observations, history, and query pair features.
-  Jointly permuting draw columns also preserves candidates within float32
-  tolerance.
-- Jitted and batched scored-prefix loss matches manual prefix scoring. A late
-  loss has finite gradients and a nonzero signal through an early draw block,
-  the learned pool, the axial proposal, and the predictor.
-
-Update the
-[repository map](../../harness/repository-map.md) for the new pooling and
-proposal responsibilities. Use the
-[development gates](../../harness/development.md) after targeted tests:
+Run the [development checks](../../harness/development.md). Use the CPU
+suite as the acceptance gate and record any existing lint findings separately.
 
 ```sh
 uv run --locked ruff check .
@@ -157,27 +114,33 @@ JAX_PLATFORMS=cpu uv run --locked pytest -q
 git diff --check
 ```
 
-For CUDA verification, run `-m pytest -q tests/test_bayes_update.py
-tests/test_pfn_port.py` through the [Slurm Python launcher](../../harness/slurm/python-example.md)
-with `JAX_PLATFORMS=cuda`. Confirm resources and the driver environment using
-the [cluster guide](../../harness/cluster.md) before submitting. Check the job
-exit status and log for the masked forward and gradient tests. If CUDA
-execution is unavailable, record the blocker and keep GPU coverage pending.
-
-## Follow-up evaluation and execution record
+## Follow-up evaluation
 
 Use the [modular Bayesian runner](../../experiments/modular_bayes/run.py) as
-the reference configuration for a later matched experiment. Compare the
-existing `AttentionProposal` and axial capacities `H=1` and `H=3` on the
-same episodes and draw streams. Report held-out NLL at equal draw counts,
-parameter count, runtime, and peak device memory. Where a kernel-conditioned
-predictive reference is available, measure mean-square error of bar
-probabilities across prefixes to assess contraction empirically.
+the reference configuration. Compare prefix-conditioned pooling with the
+draw-first axial proposal on matched episodes, draw streams, and cumulative
+draw counts. Compare history capacities one and three to measure the effect
+of older snapshots. Report held-out negative log-likelihood, parameter
+count, runtime, and peak device memory. Where a kernel-conditioned
+predictive reference is available, track mean-square error of bar
+probabilities across prefixes.
 
-A learned-query attention pool can be added through `AbstractPooling` as a
-separate comparison.
+Learned-query attention pooling can be evaluated later through the same
+two-input pooling interface. It would use prefix-conditioned keys and
+normalized scores over draws to produce the same output shape.
 
-### Execution record
+## Prefix-conditioned verification
+
+- The full CPU suite passed all 39 tests using
+  `JAX_PLATFORMS=cpu uv run --locked --no-sync pytest -q`.
+- Ruff lint and formatting passed for `navi/` and `tests/`. The repository-wide
+  checks report the existing issues in the historical replay at
+  `runs/bayes-update-66428137/pearson/replay.py`.
+- `git diff --check` passed. Runtime verification for this revision used CPU.
+
+## Previous implementation verification
+
+The following results apply to the draw-first implementation at `c832b65`.
 
 - Implemented the pool, shared mask support, and axial proposal. Added focused
   coverage and extended the existing rollout fixtures. Updated the repository

@@ -1,6 +1,6 @@
 # Axial attention proposal for Bayesian updates
 
-**Status** — Draft for the `attention-update` branch.
+**Status** — Prefix-conditioned revision implemented on `attention-update`.
 
 ## Goal
 
@@ -32,102 +32,80 @@ default and repeat the pair `depth` times with separate parameters per layer.
 | `observations` | `[N, 1]` | Observations in the same context-row order as the history and draws |
 | Candidate | `[N, D]` | One raw candidate for the integrator |
 
-`H` counts committed snapshots and `L = H + 1` counts all time slices, including
-the current block. `H=1` gives the axial model access to one committed snapshot.
-Use `H >= 2` to give it access to an older committed state as well.
+`L` is the total number of axial time slices. The first `L - 1` are retained
+committed states and the last contains the projected observations. The
+existing `history_capacity` is `H = L - 1`. A capacity of one gives the
+axial model access to the immediate predecessor.
 
-## Projecting the fresh draw block
+## Encode the prefix before pooling
 
 For a predictive bar, the exact prefix probability is a Doob martingale. If
-the infinite draw stream identifies the kernel, its limit is the bar
-probability conditional on that kernel and the observed episode. The fresh
-block supplies another finite sample of kernel evidence. The committed states
-give temporal attention a window into how estimates responded to earlier
-blocks. The Doob martingale is defined in terms of predictive probabilities. The
-draw encoding and recurrent state are learned internal representations.
+the infinite draw stream identifies the kernel, the limit is the bar
+probability conditional on that kernel and the observed episode. The effect
+of a fresh block depends on what the prefix has already established. A
+fixed-width pool can discard relationships in the draws before it has the
+context to judge their relevance. Encode the observations and committed
+states first so they can influence which fresh evidence survives pooling.
 
-The sampler and `BayesUpdate.step` use `[K, N]` draw blocks. `BayesUpdate`
-transposes the block once at the existing `AbstractProposal` boundary, so the
-projection below starts with `[N, K]`. `K` counts joint draws, `N` counts
-context rows, and `W` is both the number of learned draw slots and the hidden
-width. Each slot uses the same mixture of draws for all `N` rows, so its
-values still refer to an aligned context vector.
+1. Replace invalid history values with zeros and apply a shared projection
+   from state width `D` to attention width `W`. Project the observations
+   from `[N, 1]` to `[N, W]` and append them as the final slice. The axial
+   input has shape `[L, N, W]`. Mark the observation slice valid.
+2. In each axial layer, apply causal temporal self-attention independently
+   to each context row. For a valid query, allow only valid keys at its own
+   position or earlier. Give each padded query its own diagonal entry so
+   softmax has support, then zero the padded outputs.
+3. Complete each layer with context-row self-attention applied independently
+   at each time slice. Zero padded slices and pass the full grid to the next
+   layer. In the final layer, only the context attention at the observation
+   slice is needed. Take its `[N, W]` output as the prefix representation.
+
+The draws do not enter the axial stack. The prefix representation is the
+history available to the draw scorer. At depth one without positional
+encoding, the observation slice reads valid past states as a set. Stacked
+layers can use order indirectly because earlier slices have already been
+contextualized by causal attention.
+
+## Pool the fresh draws using the prefix
+
+`BayesUpdate.step` receives draws in `[K, N]` order and transposes them at
+the existing proposal boundary. Here `N` counts context rows, `K` counts
+joint draws, and `W` is the hidden width and number of output slots.
 
 | Operation | Input shape | Output shape | Meaning |
 | --- | --- | --- | --- |
-| Add a scalar feature axis, `draws[..., None]` | `[N, K]` | `[N, K, 1]` | The original draw matrix is also used in the pooling step. |
-| Apply a shared row MLP | `[N, K, 1]` | `[N, K, W]` | The MLP acts on the last axis with weights shared across context rows and draws. |
-| Average the scorer features over context rows | `[N, K, W]` | `[K, W]` | Reduce axis `0` to produce one score vector per joint draw. Its `W` coordinates correspond to distinct learned slots. |
-| Pool the original draws using those scores | `[N, K]` and `[K, W]` | `[N, W]` | Contract the draw axis. Each slot weights whole draw columns. |
-| Project and add the observations | `[N, 1]` and `[N, W]` | `[N, W]` | Project the observations to `[N, W]` and add to the pooled block to form the fresh temporal slice. |
+| Combine each draw value with the prefix features for its row | `[N, K]` and `[N, W]` | `[N, K, W + 1]` | Broadcast the prefix across the draw axis and concatenate it with the scalar draw value along the feature axis. |
+| Apply the shared scoring network | `[N, K, W + 1]` | `[N, K, W]` | The same two-layer network scores every row and draw. |
+| Average the scores across context rows | `[N, K, W]` | `[K, W]` | Each draw now has one score per output slot. |
+| Average the scored draw columns | `[N, K]` and `[K, W]` | `[N, W]` | For each slot, multiply every draw column by its score, add those columns, and divide by the number of draws. |
+| Form the raw candidate | Two arrays of shape `[N, W]` | `[N, D]` | Concatenate the prefix representation and pooled evidence into `[N, 2W]`, then project each row to state width `D`. |
 
-The same scorer applies to every input draw. Let `X` be the draw matrix,
-`G(X)` its score matrix, and `P` a `[K, K]` permutation matrix. Reordering
-the columns of `X` to `X @ P` reorders the score rows to `P.T @ G(X)`.
-With mean pooling, those permutations cancel in `X @ G(X) / K`. The slot
-order is fixed by the scorer's output coordinates. Permuting the context
-rows leaves the score matrix invariant because the scorer averages over
-rows, and it permutes the output context rows in the same way as the input.
-
-Each slot is a learned summary of the current block. The observation enters
-once after pooling, including on the first update when the committed state
-is zero. Temporal attention reads past states through the history tokens,
-and context attention mixes the pooled features across rows afterward.
+Every slot uses the same score for all rows of a given draw, so the rows of
+its summary stay aligned. At a fixed prefix, reordering the draws moves their
+scores with them and leaves the pooled result invariant. Permuting context
+rows together in the draws and prefix changes the pooled row order in the
+same way. With a single draw, each slot receives the sole draw column scaled
+by that slot's score. Scores can be signed.
 
 ### Pooling interface
 
-Define `AbstractPooling(eqx.Module)` with `output_width: eqx.AbstractVar[int]`
-and the abstract method `__call__(draws) -> Array`. The input is one float32
-draw block `[N, K]` with `K >= 1`. The output is a float32 array
-`[N, output_width]` in the same context-row order, with fixed learned feature
-positions. Implementations must be invariant to permutations of draw columns
-and equivariant to permutations of context rows. The pool supports tracing
-and differentiation as part of the proposal.
-
-Implement `MeanPooling` as the final Deep Sets implementation. It owns the
-shared row MLP and assembles `scores: [K, W]` as described above. It then
-computes `draws @ scores / draws.shape[1]`, the arithmetic mean of the learned
-contributions from whole draw columns. Scores can be signed. All-ones scores
-yield the ordinary draw mean in every slot. With `K=1`, each slot is the sole
-draw scaled by that slot's score.
-
-`AxialAttentionProposal` calls its `AbstractPooling` field with the fresh
-draws. Callers can inject a replacement at construction. Each concrete pool
-owns its scoring and reduction. Keep both pooling classes in
-`navi/bayes_update.py` and export them with the proposal.
-
-## Data flow
-
-1. Replace invalid history entries with zeros before projection. Project all
-   committed slices with one shared `D → W` linear map, where `W` is the mixer
-   width. Append the fresh temporal token from the pooled draw encoding and
-   observation projection to obtain `[L, N, W]`. Append `True` to the validity
-   vector.
-2. In each axial layer, apply causal temporal self-attention independently to
-   each context row. Treat `[N, L, W]` as `N` sequences of length `L` with
-   shared weights. For a valid
-   query at `i`, admit only valid keys at `j <= i`. Use a boolean mask of shape
-   `[1, 1, L, L]` broadcast over rows and heads. Give each invalid query only
-   its own diagonal entry so every softmax row has support. Zero the invalid
-   outputs after the block, including its residual and MLP paths. Use no
-   positional encoding in this draft. At depth one, the fresh read treats
-   valid past states as a set. Stacked layers can use order indirectly because
-   earlier slices have already been contextualized by causal attention.
-3. Complete the layer with plain context-row self-attention independently at
-   each time slice. Treat `[L, N, W]` as `L` sequences of length `N` with
-   weights shared across slices. Zero invalid slices and pass the full grid
-   to the next axial layer. After the last layer, select the fresh output at
-   `L - 1` and project `W → D` per row. The final layer's context block may
-   run on the fresh slice alone. Verify that this gives the same candidate
-   as running it on every slice.
+Revise `AbstractPooling` to expose `output_width` and
+`__call__(draws, prefix_features) -> Array`. The inputs are float32 arrays
+`[N, K]` and `[N, output_width]`. The result is float32 `[N, output_width]`.
+Implementations support JIT and differentiation, preserve draw-column
+invariance for fixed prefix features, and preserve context-row equivariance
+when both inputs are permuted together. `MeanPooling` owns the scoring and
+mean reduction. `AxialAttentionProposal` supplies the two input arrays so
+a replacement pool can change its scoring and reduction together.
 
 ## Integration and cost
 
-Reuse the projections, normalization, and residual structure in
-[`navi/blocks.py`](../../navi/blocks.py). Thread an optional boolean mask through
-`_Block` and `_Attention` to the existing XLA attention call. Keep the existing
-optional additive bias for callers that supply it. Initialize the default pool,
-blocks, and projections with separate splits of the constructor key.
+Reuse the existing boolean mask path, projections, normalization, and residual
+structure in [`navi/blocks.py`](../../navi/blocks.py). Initialize the default
+pool, blocks, and projections with separate splits of the constructor key.
+Custom pools for the axial proposal need the new two-input call signature.
+The default pool's first projection and the proposal's output projection
+change shape, so start revised axial models from fresh parameters.
 
 `BayesUpdate` already advances the fixed-size history once per block. The
 integrator applies `tanh` and uses the absolute block step. `advance_chunk`
@@ -140,11 +118,11 @@ proposal has its own parameter tree and starts from a fresh initialization.
 
 Each full axial layer has `N L² + L N²` attention score entries per head,
 versus `(LN)²` for dense attention over the flattened grid. Evaluating the
-final layer's context pass on the fresh slice reduces that layer's count to
-`N L² + N²`. The fresh-block scorer runs a shared MLP on `N K` scalar values,
-and the default
-pool uses `O(N K W)` work for the matrix product. The pooled slice contributes
-one time slot and the persistent history stores `HND` embedding values.
+final layer's context pass on the observation slice reduces that layer's
+count to `N L² + N²`. The shared scorer runs on `N K` pairs of draw values
+and prefix features. The mean reduction uses `O(N K W)` work for the matrix
+product. The pooled draws contribute to the candidate head and the
+persistent history stores `H N D` embedding values.
 
 ## Verification
 
@@ -153,9 +131,9 @@ Extend the coverage in [`tests/test_bayes_update.py`](../../tests/test_bayes_upd
 | Contract | Check |
 | --- | --- |
 | Mean pooling follows its contract | Compare the matrix product with an explicit sum of weighted draw columns divided by `K`. Cover signed and all-ones scores and `K=1`. |
-| Pooling is replaceable | Inject a test pool with a distinguishable `[N, W]` output. Check that it receives the draw block and that its output enters the fresh slice during a jitted update. Check that construction rejects a mismatched `output_width`. |
+| Pooling is replaceable | Inject a deterministic pool and verify that it receives the raw draw block and final axial hidden state and that its output reaches the candidate head in a jitted update. Reject a mismatched `output_width`. |
 | Projection uses joint draws | For a slot that scores each draw by its context-row mean, compare blocks with columns `(1, 1), (-1, -1)` and `(1, -1), (-1, 1)`. The pooled slot is `(1, 1)` for the first block and `(0, 0)` for the second, despite identical row marginals. |
-| Fresh evidence and history enter separately | Hold the draws fixed and vary the observations and committed states. Check that the pooled draw encoding is identical. On the first update, vary the observation and check that it reaches the temporal token through its own projection. |
+| Scoring uses the prefix before pooling | Hold the draws fixed and use controlled scorer weights to show that changing observations on the first update, or a valid older snapshot in a later update, changes the pooled evidence. Hold history and observations fixed and confirm that varying the draws leaves the prefix representation unchanged. |
 | Startup padding is inert | Perturb invalid history slots while holding valid slots fixed. Check equal finite candidates and zero gradients with respect to the padded values. Include the first update from the valid zero snapshot. |
 | Stacked axial layers are causal | Change a later valid slice and compare all earlier valid outputs from both blocks with those from the unmodified input. Exercise depths one and two and compare the final-slice shortcut with the full-grid reference. |
 | Older states affect the proposal | With `H >= 2` and controlled weights, change a valid older snapshot while fixing the latest state, draws, and observations. Check that the raw candidate changes. |
@@ -168,8 +146,9 @@ For the follow-up evaluation, use the
 [modular Bayesian runner](../../experiments/modular_bayes/run.py) settings as a
 reference. Compare axial `H=1` with axial `H=3` using the same pooling design
 to measure the contribution of older snapshots. Include the existing
-`AttentionProposal` as a baseline. Match episodes and joint draw streams. Report held-out NLL at
-equal cumulative draw counts along with parameter count, runtime, and peak
+`AttentionProposal` and the current draw-first axial proposal as baselines.
+Match episodes and joint draw streams. Report held-out negative log-likelihood
+at equal cumulative draw counts along with parameter count, runtime, and peak
 device memory. For a contraction check on simulated episodes, track the
 mean-square distance of learned bar probabilities to a kernel-conditioned
 reference across prefixes when that reference is available.
@@ -177,8 +156,7 @@ reference across prefixes when that reference is available.
 ## Future work
 
 Evaluate learned-query attention pooling as another `AbstractPooling`
-implementation. Encode each joint draw as a key and use `W` learned queries
-to score the `K` draws. Normalize over `K` for each query and use the resulting
-weights to combine the draw columns. This preserves the `[N, K] → [N, W]`
-contract and can be compared with Deep Sets mean pooling using the same axial
-proposal.
+implementation. Encode each joint draw as a key using the prefix features
+and use `W` learned queries to score the draws. Normalize the scores over the
+draw axis for each query, then use the weights to combine the joint draw
+columns. Keep the same input and output shapes as the mean pool.

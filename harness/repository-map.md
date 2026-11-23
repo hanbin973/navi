@@ -26,8 +26,9 @@ changing them.
 
 ## Application code and tests
 
-- `navi/bayes_update.py` — single-snapshot and axial proposals, Deep Sets draw
-  pooling, integrator interfaces, recurrent updates, and draw rollouts.
+- `navi/bayes_update.py` — single-snapshot and axial proposals, prefix-conditioned
+  Deep Sets draw pooling, integrator interfaces, recurrent updates, and draw
+  rollouts.
 - `navi/predictor.py` — predictor interface and bar logits from recurrent context snapshots.
 - `navi/training.py` — draw-prefix selection and the training objective that composes updater and predictor.
 - `navi/blocks.py` — shared dense PFNs attention, MLP, and Transformer blocks.

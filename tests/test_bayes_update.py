@@ -159,42 +159,56 @@ def test_mean_pooling_averages_signed_scores_and_keeps_draw_alignment():
         ),
         pool,
         (
-            jnp.array([[1.0], [-1.0]]),
+            jnp.array([[1.0, 1.0, 0.0], [-1.0, -1.0, 0.0]]),
             jnp.zeros(2),
             jnp.array([[1.0, -1.0], [0.0, 0.0]]),
             jnp.array([0.0, 1.0]),
         ),
     )
-    apply = eqx.filter_jit(lambda model, draws: model(draws))
+    apply = eqx.filter_jit(lambda model, draws, prefix: model(draws, prefix))
+    zero_prefix = jnp.zeros((2, 2))
     aligned = jnp.array([[1.0, -1.0], [1.0, -1.0]])
     opposite = aligned.at[1].set(jnp.array([-1.0, 1.0]))
-    np.testing.assert_array_equal(apply(pool, aligned), [[1.0, 0.0], [1.0, 0.0]])
-    np.testing.assert_array_equal(apply(pool, opposite), jnp.zeros((2, 2)))
+    np.testing.assert_array_equal(
+        apply(pool, aligned, zero_prefix), [[1.0, 0.0], [1.0, 0.0]]
+    )
+    np.testing.assert_array_equal(apply(pool, opposite, zero_prefix), 0.0)
 
     draws = jnp.array([[1.0, -2.0, 3.0], [0.5, -4.0, 2.0]])
+    prefix = jnp.array([[0.5, 2.0], [1.5, -1.0]])
+    first_slot_scores = (draws + prefix[:, :1]).mean(axis=0)
     expected = jnp.stack(
-        ((draws * draws.mean(axis=0)).mean(axis=1), draws.mean(axis=1)), axis=1
+        ((draws * first_slot_scores).mean(axis=1), draws.mean(axis=1)), axis=1
     )
-    actual = apply(pool, draws)
+    actual = apply(pool, draws, prefix)
     assert actual.shape == (2, 2) and actual.dtype == jnp.float32
     np.testing.assert_allclose(actual, expected, atol=1e-6)
     np.testing.assert_allclose(
-        apply(pool, draws[:, jnp.array([2, 0, 1])]), actual, atol=1e-6
+        apply(pool, draws[:, jnp.array([2, 0, 1])], prefix), actual, atol=1e-6
     )
-    np.testing.assert_array_equal(apply(pool, draws[::-1]), actual[::-1])
+    np.testing.assert_array_equal(apply(pool, draws[::-1], prefix[::-1]), actual[::-1])
+    assert not np.allclose(apply(pool, draws, zero_prefix)[:, 0], actual[:, 0])
     np.testing.assert_array_equal(
-        apply(pool, draws[:, 1:2]), [[6.0, -2.0], [12.0, -4.0]]
+        apply(pool, draws[:, 1:2], prefix), [[4.0, -2.0], [8.0, -4.0]]
     )
+
+
+def test_mean_pooling_rejects_invalid_prefix_features():
+    pool = MeanPooling(2, key=jax.random.key(31))
+    draws = jnp.ones((3, 4), dtype=jnp.float32)
+    for shape in [(2, 2), (3, 1)]:
+        with pytest.raises(ValueError, match="prefix_features must have shape"):
+            pool(draws, jnp.zeros(shape, dtype=jnp.float32))
+    with pytest.raises(TypeError, match="prefix_features must have dtype float32"):
+        pool(draws, jnp.zeros((3, 2), dtype=jnp.int32))
 
 
 @final
-class BroadcastMeanPooling(AbstractPooling):
+class PrefixWeightedMeanPooling(AbstractPooling):
     output_width: int = eqx.field(static=True)
 
-    def __call__(self, draws):
-        return jnp.broadcast_to(
-            draws.mean(axis=1, keepdims=True), (draws.shape[0], self.output_width)
-        )
+    def __call__(self, draws, prefix_features):
+        return draws.mean(axis=1, keepdims=True) * prefix_features
 
 
 @pytest.mark.parametrize("depth", [1, 2])
@@ -209,7 +223,12 @@ def test_axial_layers_are_causal_and_match_full_grid(depth):
         pre_norm=True,
         depth=depth,
         key=jax.random.key(28),
-        pooling=BroadcastMeanPooling(width),
+        pooling=PrefixWeightedMeanPooling(width),
+    )
+    model = eqx.tree_at(
+        lambda p: p.output_projection.weight,
+        model,
+        model.output_projection.weight.at[:, :width].set(0),
     )
     update = BayesUpdate(model, CommitCandidate())
     state = update.initial_state(4)
@@ -227,32 +246,50 @@ def test_axial_layers_are_causal_and_match_full_grid(depth):
     )[None, None]
     valid = jnp.array([False, False, True, True])
     np.testing.assert_array_equal(model._temporal_mask(valid), full_mask)
-    pooled = jnp.broadcast_to(draws.mean(axis=0)[:, None], (4, width))
 
-    def full_grid(fresh):
+    def full_grid(observed):
         past = jax.vmap(jax.vmap(model.history_projection))(state.history)
-        grid = jnp.concatenate((past, fresh[None]), axis=0)
+        grid = jnp.concatenate((past, observed[None]), axis=0)
         stages = []
         for temporal, context in model.layers:
             grid = model._mix_time(temporal, grid, full_mask, valid)
             stages.append(grid)
             grid = jnp.where(valid[:, None, None], jax.vmap(context)(grid), 0)
             stages.append(grid)
-        return jax.vmap(model.output_projection)(grid[-1]), stages
+        return grid[-1], stages
+
+    def reference_candidate(prefix, block):
+        pooled = block.mean(axis=0)[:, None] * prefix
+        return jax.vmap(model.output_projection)(
+            jnp.concatenate((prefix, pooled), axis=-1)
+        )
 
     observed = jax.vmap(model.observation_projection)(observations)
-    expected, stages = full_grid(pooled + observed)
+    prefix, stages = full_grid(observed)
+    np.testing.assert_allclose(
+        model._encode_prefix(state.history, state.valid, observations),
+        prefix,
+        atol=2e-6,
+    )
     step = eqx.filter_jit(lambda update, carry, draw, y: update.step(carry, draw, y))
     actual, _ = step(update, state, draws, observations)
     assert actual.history.shape == (3, 4, state_width)
-    np.testing.assert_allclose(actual.history[-1], expected, atol=2e-6)
+    np.testing.assert_allclose(
+        actual.history[-1], reference_candidate(prefix, draws), atol=2e-6
+    )
+    changed_draws, _ = step(update, state, draws + 1, observations)
+    np.testing.assert_allclose(
+        changed_draws.history[-1], reference_candidate(prefix, draws + 1), atol=2e-6
+    )
 
     changed_observations = observations + 0.5
-    changed_expected, changed_stages = full_grid(
-        pooled + jax.vmap(model.observation_projection)(changed_observations)
+    changed_prefix, changed_stages = full_grid(
+        jax.vmap(model.observation_projection)(changed_observations)
     )
     changed, _ = step(update, state, draws, changed_observations)
-    np.testing.assert_allclose(changed.history[-1], changed_expected, atol=2e-6)
+    np.testing.assert_allclose(
+        changed.history[-1], reference_candidate(changed_prefix, draws), atol=2e-6
+    )
     assert not np.allclose(changed.history[-1], actual.history[-1])
     for before, after in zip(stages, changed_stages, strict=True):
         np.testing.assert_array_equal(before[:2], 0.0)
@@ -264,7 +301,7 @@ def test_axial_proposal_validates_configuration_and_respects_history_mask():
     proposal = update.proposal
     kwargs = {"history_capacity": 3, "pre_norm": True, "key": jax.random.key(29)}
     for overrides, match in (
-        ({"pooling": BroadcastMeanPooling(4)}, "pool output width"),
+        ({"pooling": PrefixWeightedMeanPooling(4)}, "pool output width"),
         ({"depth": 0}, "depth"),
         ({"history_capacity": 0}, "history capacity"),
     ):
@@ -282,6 +319,15 @@ def test_axial_proposal_validates_configuration_and_respects_history_mask():
     )
     np.testing.assert_array_equal(grad[:2], 0.0)
 
+    width = proposal.pooling.output_width
+    proposal = eqx.tree_at(
+        lambda p: (p.pooling, p.output_projection.weight),
+        proposal,
+        (
+            PrefixWeightedMeanPooling(width),
+            proposal.output_projection.weight.at[:, :width].set(0),
+        ),
+    )
     valid = jnp.array([False, True, True])
     original = proposal(carry.history, valid, draws[0].T, observations)
     older = jax.random.normal(jax.random.key(30), carry.history[1].shape)
