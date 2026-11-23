@@ -2,7 +2,8 @@
 
 **Branch** `attention-update`
 
-**Status** Prefix-conditioned revision implemented and verified on CPU.
+**Status** Prefix-conditioned pooling with the explicit draw–prefix
+interaction is implemented and verified on CPU.
 
 The [design draft](draft_attn_proposal.md) moves the axial stack ahead of
 Deep Sets mean pooling. The stack reads the retained states and observations.
@@ -114,6 +115,38 @@ JAX_PLATFORMS=cpu uv run --locked pytest -q
 git diff --check
 ```
 
+## 4. Add the explicit draw–prefix interaction
+
+**State** Complete. Second-moment reference and rollout tests passed on CPU.
+
+In `MeanPooling`, keep the existing joint scorer as the nonlinear term.
+Add a separate `_MLP` that maps the prefix features at each context row
+from width `W` to width `W`, with a hidden layer of width `W`. Initialize
+the two networks from separate splits of the pool key. Keep the two-input
+pooling interface and candidate head.
+
+1. Compute the joint scores `[N, K, W]` with the existing scorer.
+2. Evaluate the prefix-only network once per row to get `[N, W]`
+   multipliers. Insert a draw axis to get `[N, 1, W]`, then multiply by
+   the draws with a scalar feature axis `[N, K, 1]`. Broadcasting forms
+   `[N, K, W]` product scores.
+3. Add the two score arrays before averaging over context rows. Use the
+   resulting `[K, W]` scores to compute the same mean of weighted draw
+   columns as in task 1.
+
+Adjust the existing controlled scorer test to zero the prefix-only network's
+output. Add a test with both terms active that compares the result against
+an explicit empirical second-moment matrix applied to the prefix multipliers,
+plus the joint scorer's contribution. Run the full CPU suite to check the
+existing permutation, rollout, and gradient contracts. Use fresh initialization
+because the pool gains parameter leaves. For a later matched experiment,
+compare the prefix-conditioned design with and without the product term.
+
+```sh
+JAX_PLATFORMS=cpu uv run --locked pytest -q tests/test_bayes_update.py -k mean_pooling
+JAX_PLATFORMS=cpu uv run --locked pytest -q
+```
+
 ## Follow-up evaluation
 
 Use the [modular Bayesian runner](../../experiments/modular_bayes/run.py) as
@@ -129,7 +162,18 @@ Learned-query attention pooling can be evaluated later through the same
 two-input pooling interface. It would use prefix-conditioned keys and
 normalized scores over draws to produce the same output shape.
 
-## Prefix-conditioned verification
+## Verification with the interaction term
+
+- All 40 CPU tests passed using `JAX_PLATFORMS=cpu uv run --locked --no-sync pytest -q`.
+  The pool matched the explicit second-moment reference, and a late-prefix
+  loss produced finite, nonzero gradients through each scoring network.
+- Ruff lint and formatting passed for `navi/` and `tests/`. Repository-wide
+  Ruff reported the same historical replay issues recorded below.
+- `git diff --check` passed. Runtime verification for this revision used CPU.
+
+## Prefix-conditioned verification before the interaction term
+
+The following results apply to the joint scorer at `1c2d004`.
 
 - The full CPU suite passed all 39 tests using
   `JAX_PLATFORMS=cpu uv run --locked --no-sync pytest -q`.

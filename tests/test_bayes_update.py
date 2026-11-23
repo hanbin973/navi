@@ -156,6 +156,8 @@ def test_mean_pooling_averages_signed_scores_and_keeps_draw_alignment():
             p.scorer.linear1.bias,
             p.scorer.linear2.weight,
             p.scorer.linear2.bias,
+            p.prefix_scorer.linear2.weight,
+            p.prefix_scorer.linear2.bias,
         ),
         pool,
         (
@@ -163,6 +165,8 @@ def test_mean_pooling_averages_signed_scores_and_keeps_draw_alignment():
             jnp.zeros(2),
             jnp.array([[1.0, -1.0], [0.0, 0.0]]),
             jnp.array([0.0, 1.0]),
+            jnp.zeros((2, 2)),
+            jnp.zeros(2),
         ),
     )
     apply = eqx.filter_jit(lambda model, draws, prefix: model(draws, prefix))
@@ -191,6 +195,38 @@ def test_mean_pooling_averages_signed_scores_and_keeps_draw_alignment():
     np.testing.assert_array_equal(
         apply(pool, draws[:, 1:2], prefix), [[4.0, -2.0], [8.0, -4.0]]
     )
+
+
+def test_mean_pooling_adds_prefix_weighted_second_moments():
+    pool = MeanPooling(2, key=jax.random.key(32))
+    joint_scores = jnp.array([0.25, -1.0])
+    prefix_scales = jnp.array([1.0, -2.0])
+    pool = eqx.tree_at(
+        lambda p: (
+            p.scorer.linear2.weight,
+            p.scorer.linear2.bias,
+            p.prefix_scorer.linear1.weight,
+            p.prefix_scorer.linear1.bias,
+            p.prefix_scorer.linear2.weight,
+            p.prefix_scorer.linear2.bias,
+        ),
+        pool,
+        (
+            jnp.zeros((2, 2)),
+            joint_scores,
+            jnp.eye(2),
+            jnp.zeros(2),
+            jnp.diag(prefix_scales),
+            jnp.zeros(2),
+        ),
+    )
+    draws = jnp.array([[1.0, -2.0, 3.0], [0.5, -4.0, 2.0]])
+    prefix = jnp.array([[0.5, 2.0], [1.5, 1.0]])
+    second_moments = (draws @ draws.T) / draws.shape[1]
+    expected_product = second_moments @ (prefix * prefix_scales) / draws.shape[0]
+    expected_joint = draws.mean(axis=1, keepdims=True) * joint_scores
+    actual = eqx.filter_jit(lambda p, x, h: p(x, h))(pool, draws, prefix)
+    np.testing.assert_allclose(actual, expected_product + expected_joint, atol=1e-6)
 
 
 def test_mean_pooling_rejects_invalid_prefix_features():
@@ -429,7 +465,12 @@ def test_late_loss_differentiates_through_early_draw_and_both_networks(axial):
 
     grads = eqx.filter_jit(eqx.filter_grad(score))((update, predictor, draws[0]))
     if axial:
-        grads += (grads[0].proposal.pooling, grads[0].proposal.layers)
+        proposal_grad = grads[0].proposal
+        grads += (
+            proposal_grad.pooling.scorer,
+            proposal_grad.pooling.prefix_scorer,
+            proposal_grad.layers,
+        )
     for tree in grads:
         leaves = jax.tree.leaves(tree)
         assert all(np.isfinite(value).all() for value in leaves)

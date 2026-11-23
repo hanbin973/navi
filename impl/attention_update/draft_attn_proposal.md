@@ -1,6 +1,6 @@
 # Axial attention proposal for Bayesian updates
 
-**Status** — Prefix-conditioned revision implemented on `attention-update`.
+**Status** — Explicit draw–prefix interaction implemented on `attention-update`.
 
 ## Goal
 
@@ -75,10 +75,19 @@ joint draws, and `W` is the hidden width and number of output slots.
 | Operation | Input shape | Output shape | Meaning |
 | --- | --- | --- | --- |
 | Combine each draw value with the prefix features for its row | `[N, K]` and `[N, W]` | `[N, K, W + 1]` | Broadcast the prefix across the draw axis and concatenate it with the scalar draw value along the feature axis. |
-| Apply the shared scoring network | `[N, K, W + 1]` | `[N, K, W]` | The same two-layer network scores every row and draw. |
+| Apply the joint scoring network | `[N, K, W + 1]` | `[N, K, W]` | A shared two-layer network produces the nonlinear score from each draw value and its row's prefix features. |
+| Compute prefix multipliers | `[N, W]` | `[N, W]` | A separate shared two-layer network produces one multiplier per slot for each context row. Evaluate it once per row. |
+| Add the draw–prefix product | `[N, K]`, `[N, W]`, and `[N, K, W]` | `[N, K, W]` | Multiply each scalar draw value by its row's prefix multipliers and add the resulting slot scores to the joint network's scores. |
 | Average the scores across context rows | `[N, K, W]` | `[K, W]` | Each draw now has one score per output slot. |
 | Average the scored draw columns | `[N, K]` and `[K, W]` | `[N, W]` | For each slot, multiply every draw column by its score, add those columns, and divide by the number of draws. |
 | Form the raw candidate | Two arrays of shape `[N, W]` | `[N, D]` | Concatenate the prefix representation and pooled evidence into `[N, 2W]`, then project each row to state width `D`. |
+
+For a scalar draw value $\xi$, its row's prefix vector $h$, and output slot
+$w$, the total score is $\xi\,\phi_w(h) + \psi_w(\xi,h)$. The prefix-only
+network supplies $\phi_w$, and the joint network supplies $\psi_w$. When the
+pool weights whole draw columns with these scores, the product term contributes
+empirical second moments between context rows, weighted by learned prefix
+multipliers. The joint network can learn additional interactions.
 
 Every slot uses the same score for all rows of a given draw, so the rows of
 its summary stay aligned. At a fixed prefix, reordering the draws moves their
@@ -95,8 +104,9 @@ Revise `AbstractPooling` to expose `output_width` and
 Implementations support JIT and differentiation, preserve draw-column
 invariance for fixed prefix features, and preserve context-row equivariance
 when both inputs are permuted together. `MeanPooling` owns the scoring and
-mean reduction. `AxialAttentionProposal` supplies the two input arrays so
-a replacement pool can change its scoring and reduction together.
+mean reduction, including both scoring networks. `AxialAttentionProposal`
+supplies the two input arrays so a replacement pool can change its scoring
+and reduction together.
 
 ## Integration and cost
 
@@ -104,8 +114,8 @@ Reuse the existing boolean mask path, projections, normalization, and residual
 structure in [`navi/blocks.py`](../../navi/blocks.py). Initialize the default
 pool, blocks, and projections with separate splits of the constructor key.
 Custom pools for the axial proposal need the new two-input call signature.
-The default pool's first projection and the proposal's output projection
-change shape, so start revised axial models from fresh parameters.
+The product term adds parameters to the default pool. Use fresh initialization
+for this version and the matching revision to replay earlier checkpoints.
 
 `BayesUpdate` already advances the fixed-size history once per block. The
 integrator applies `tanh` and uses the absolute block step. `advance_chunk`
@@ -119,10 +129,10 @@ proposal has its own parameter tree and starts from a fresh initialization.
 Each full axial layer has `N L² + L N²` attention score entries per head,
 versus `(LN)²` for dense attention over the flattened grid. Evaluating the
 final layer's context pass on the observation slice reduces that layer's
-count to `N L² + N²`. The shared scorer runs on `N K` pairs of draw values
-and prefix features. The mean reduction uses `O(N K W)` work for the matrix
-product. The pooled draws contribute to the candidate head and the
-persistent history stores `H N D` embedding values.
+count to `N L² + N²`. The joint scorer runs on `N K` draw–prefix pairs.
+The prefix-only scorer runs on `N` rows, and its output is broadcast along
+the draw axis for the product. The mean reduction uses `O(N K W)` work for
+the matrix product. The persistent history stores `H N D` embedding values.
 
 ## Verification
 
@@ -131,6 +141,7 @@ Extend the coverage in [`tests/test_bayes_update.py`](../../tests/test_bayes_upd
 | Contract | Check |
 | --- | --- |
 | Mean pooling follows its contract | Compare the matrix product with an explicit sum of weighted draw columns divided by `K`. Cover signed and all-ones scores and `K=1`. |
+| Both scoring terms contribute | Set known weights in both networks and compare the result with the sum of a prefix-weighted empirical second-moment contribution and the contribution from the joint network. |
 | Pooling is replaceable | Inject a deterministic pool and verify that it receives the raw draw block and final axial hidden state and that its output reaches the candidate head in a jitted update. Reject a mismatched `output_width`. |
 | Projection uses joint draws | For a slot that scores each draw by its context-row mean, compare blocks with columns `(1, 1), (-1, -1)` and `(1, -1), (-1, 1)`. The pooled slot is `(1, 1)` for the first block and `(0, 0)` for the second, despite identical row marginals. |
 | Scoring uses the prefix before pooling | Hold the draws fixed and use controlled scorer weights to show that changing observations on the first update, or a valid older snapshot in a later update, changes the pooled evidence. Hold history and observations fixed and confirm that varying the draws leaves the prefix representation unchanged. |
@@ -146,7 +157,8 @@ For the follow-up evaluation, use the
 [modular Bayesian runner](../../experiments/modular_bayes/run.py) settings as a
 reference. Compare axial `H=1` with axial `H=3` using the same pooling design
 to measure the contribution of older snapshots. Include the existing
-`AttentionProposal` and the current draw-first axial proposal as baselines.
+`AttentionProposal` and the earlier draw-first axial proposal as baselines.
+Compare the same prefix-conditioned scorer with and without the product term.
 Match episodes and joint draw streams. Report held-out negative log-likelihood
 at equal cumulative draw counts along with parameter count, runtime, and peak
 device memory. For a contraction check on simulated episodes, track the

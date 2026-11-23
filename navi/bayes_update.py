@@ -104,16 +104,23 @@ class AbstractPooling(eqx.Module):
 
 @final
 class MeanPooling(AbstractPooling):
-    """Mean-pool whole draws with scores conditioned on the prefix features."""
+    """Mean-pool whole draws using a product term and a joint scorer."""
 
     output_width: int = eqx.field(static=True)
     scorer: _MLP
+    prefix_scorer: _MLP
 
     def __init__(self, width: int, *, key: Array):
         if type(width) is not int or width < 1:
             raise ValueError("pool output width must be a positive integer")
         self.output_width = width
-        self.scorer = _MLP(width + 1, width, width, bias=True, zero_init=False, key=key)
+        joint_key, prefix_key = jax.random.split(key)
+        self.scorer = _MLP(
+            width + 1, width, width, bias=True, zero_init=False, key=joint_key
+        )
+        self.prefix_scorer = _MLP(
+            width, width, width, bias=True, zero_init=False, key=prefix_key
+        )
 
     def __call__(self, draws: Array, prefix_features: Array) -> Array:
         if draws.ndim != 2 or not all(draws.shape):
@@ -132,9 +139,12 @@ class MeanPooling(AbstractPooling):
         prefix_by_draw = jnp.broadcast_to(
             prefix_features[:, None, :], (*draws.shape, self.output_width)
         )
-        scorer_inputs = jnp.concatenate((draws[..., None], prefix_by_draw), axis=-1)
-        row_scores = jax.vmap(jax.vmap(self.scorer))(scorer_inputs)
-        scores = row_scores.mean(axis=0)
+        draw_values = draws[..., None]
+        scorer_inputs = jnp.concatenate((draw_values, prefix_by_draw), axis=-1)
+        joint_scores = jax.vmap(jax.vmap(self.scorer))(scorer_inputs)
+        prefix_multipliers = jax.vmap(self.prefix_scorer)(prefix_features)
+        product_scores = draw_values * prefix_multipliers[:, None, :]
+        scores = (joint_scores + product_scores).mean(axis=0)
         return (draws @ scores) / draws.shape[1]
 
 
