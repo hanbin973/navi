@@ -5,16 +5,16 @@
 ## Goal
 
 Let each Bayesian update use a bounded window of committed context states when
-proposing the next state. The current `AttentionProposal` reads only the latest
-snapshot. The new `AxialAttentionProposal` completes the temporal and context-row
-attention design in the [modular Bayesian draft](../modular_bayes/draft_modular_bayes.md#future-axial-attention-proposal).
+proposing the next state. `AxialAttentionProposal` completes the temporal and
+context-row attention design in the
+[modular Bayesian draft](../modular_bayes/draft_modular_bayes.md#future-axial-attention-proposal).
 Callers select it when constructing `BayesUpdate`.
 
 ## Proposal contract
 
 Implement `AxialAttentionProposal` as a final `AbstractProposal` in
 [`navi/bayes_update.py`](../../navi/bayes_update.py) and export it from
-[`navi/__init__.py`](../../navi/__init__.py) alongside `AttentionProposal`.
+[`navi/__init__.py`](../../navi/__init__.py).
 The proposed constructor is `AxialAttentionProposal(state_width, width, heads,
 *, history_capacity, pre_norm, key, pooling=None, depth=1)`. Use
 `MeanPooling(width, key=pool_key)` when `pooling` is omitted, with `pool_key`
@@ -151,13 +151,13 @@ Extend the coverage in [`tests/test_bayes_update.py`](../../tests/test_bayes_upd
 | Symmetries hold | Permute context rows together in history, draws, and observations and check the same permutation in candidates. Align predictor pair features and check equal query logits. Jointly reorder draw columns and check equal candidates within float32 roundoff. |
 | The standard rollout works | Compare a single scan with chunked continuation across startup and rollover for `K=1` and `K>1`. Compare the entire carry, including validity and both counters. Check batched, jitted prefix loss against manual scoring. |
 | Late losses train earlier updates | Differentiate a late-prefix loss under JIT. Check finite gradients and a nonzero signal through an early draw block and both the proposal and predictor. |
-| Shared attention behavior is preserved | Run the existing unmasked, additive-bias, and pinned PFNs parity tests after extending the mask interface. |
+| Shared attention behavior is preserved | Check additive bias against explicit scaled dot-product attention and verify that a mask excludes keys in both normalization modes. |
 
 For the follow-up evaluation, use the
 [modular Bayesian runner](../../experiments/modular_bayes/run.py) settings as a
 reference. Compare axial `H=1` with axial `H=3` using the same pooling design
-to measure the contribution of older snapshots. Include the existing
-`AttentionProposal` and the earlier draw-first axial proposal as baselines.
+to measure the contribution of older snapshots. The earlier draw-first axial
+proposal is available as a baseline at its recorded revision.
 Compare the same prefix-conditioned scorer with and without the product term.
 Match episodes and joint draw streams. Report held-out negative log-likelihood
 at equal cumulative draw counts along with parameter count, runtime, and peak

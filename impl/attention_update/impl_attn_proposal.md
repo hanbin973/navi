@@ -87,8 +87,8 @@ The two-input pooling call changes the contract for custom axial pools.
 Update any in-repository implementations and callers when making the change.
 The scorer input and candidate projection have new parameter shapes. Use
 fresh axial initialization and the previous revision for replaying draw-first
-checkpoints. The original single-snapshot `AttentionProposal` and the shared
-attention mask interface retain their existing signatures.
+checkpoints. The shared attention mask interface retains its existing
+signature. The provisional single-snapshot proposal is available at `b836e7b`.
 
 ## 3. Verify rollout integration
 

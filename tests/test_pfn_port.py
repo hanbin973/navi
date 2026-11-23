@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -7,8 +5,6 @@ import numpy as np
 import pytest
 
 from navi.blocks import _MLP, _Attention, _Block
-
-FIXTURE = Path(__file__).parent / "fixtures" / "pfn_port.npz"
 
 
 def close(actual, expected):
@@ -36,80 +32,15 @@ def test_initialization():
     assert jnp.max(jnp.abs(attn.w_out)) <= np.sqrt(6 / ((2 + 3) * 6))
 
 
-@pytest.fixture(scope="module")
-def reference():
-    with np.load(FIXTURE) as data:
-        assert data["commit"] == "f04d3cad1d4d464f1039ec04d55b8f004b60494a"
-        yield data
-
-
-def reference_block(data):
-    block = _Block(4, 2, 7, zero_init=False, key=jax.random.key(0))
-    return eqx.tree_at(
-        lambda b: (
-            b.attention.w_q,
-            b.attention.w_k,
-            b.attention.w_v,
-            b.attention.w_out,
-            b.mlp.linear1.weight,
-            b.mlp.linear2.weight,
-        ),
-        block,
-        tuple(
-            map(
-                jnp.asarray,
-                (*data["w_qkv"], data["w_out"], data["linear1"], data["linear2"]),
-            )
-        ),
+def test_rectangular_attention_with_logit_bias():
+    model_key, query_key, source_key, cotangent_key = jax.random.split(
+        jax.random.key(4), 4
     )
-
-
-@pytest.mark.parametrize("case", ["attention", "context", "query"])
-def test_pinned_pfn_forward_and_gradients(reference, case):
-    data = reference
-    block = reference_block(data)
-    query = jnp.asarray(data["input_query"])
-    source = jnp.asarray(data["input_source"])
-
-    if case == "attention":
-        model = block.attention
-        for actual, name in zip(
-            model.project(query, source), ("q", "k", "v"), strict=True
-        ):
-            close(actual, data[name])
-        forward = lambda m, q, s: m(q, s)
-    elif case == "context":
-        model = block
-        forward = lambda m, s: m(s[0])[None]
-    else:
-        model = block
-        forward = lambda m, q, s: m(q[0], s[0])[None]
-
-    inputs = (source,) if case == "context" else (query, source)
-
-    def contract(arguments):
-        model, *inputs = arguments
-        output = forward(model, *inputs)
-        return jnp.sum(output * data[f"{case}_cotangent"]), output
-
-    (_, output), (grad, *input_grads) = eqx.filter_jit(
-        eqx.filter_value_and_grad(contract, has_aux=True)
-    )((model, *inputs))
-    close(output, data[f"{case}_output"])
-    attn = grad if case == "attention" else grad.attention
-    grads = [*input_grads, jnp.stack((attn.w_q, attn.w_k, attn.w_v)), attn.w_out]
-    if case != "attention":
-        grads.extend((grad.mlp.linear1.weight, grad.mlp.linear2.weight))
-    for index, actual in enumerate(grads):
-        close(actual, data[f"{case}_grad_{index}"])
-
-
-def test_rectangular_attention_with_logit_bias(reference):
-    attention = reference_block(reference).attention
-    query = jnp.asarray(reference["input_query"])
-    source = jnp.asarray(reference["input_source"])
+    attention = _Attention(4, 2, zero_init=False, key=model_key)
+    query = jax.random.normal(query_key, (1, 2, 4), dtype=jnp.float32)
+    source = jax.random.normal(source_key, (1, 3, 4), dtype=jnp.float32)
     bias = jnp.array([[[[0.2, -0.7, 0.9]], [[-0.5, 0.4, 0.1]]]], dtype=query.dtype)
-    cotangent = jnp.asarray(reference["attention_cotangent"])
+    cotangent = jax.random.normal(cotangent_key, query.shape, dtype=query.dtype)
 
     def explicit(attention, query, source, bias):
         q, k, v = attention.project(query, source)

@@ -26,9 +26,8 @@ changing them.
 
 ## Application code and tests
 
-- `navi/bayes_update.py` — single-snapshot and axial proposals, prefix-conditioned
-  Deep Sets draw pooling, integrator interfaces, recurrent updates, and draw
-  rollouts.
+- `navi/bayes_update.py` — axial proposal, prefix-conditioned Deep Sets draw
+  pooling, proposal and integrator interfaces, and recurrent rollouts.
 - `navi/predictor.py` — predictor interface and bar logits from recurrent context snapshots.
 - `navi/training.py` — draw-prefix selection and the training objective that composes updater and predictor.
 - `navi/blocks.py` — shared dense PFNs attention, MLP, and Transformer blocks.
@@ -47,11 +46,10 @@ changing them.
 - `experiments/gp_experiment/` — historical fixed-context Gaussian episode simulation,
   Navi training, and paired oracle evaluation. Replay from the original commit.
 - `tests/test_bayes_update.py` — integration, history, prefix loss, symmetry, and gradients.
-- `tests/test_pfn_port.py` — primitive initialization and pinned PFNs parity.
+- `tests/test_pfn_port.py` — block initialization, additive attention bias, and masking.
 - `tests/test_navi_helper.py` — kernel alignment, joint simulation, BLUP
   reference, and training episode checks.
 - `tests/test_navi_model.py` — predictor context reuse, input validation, and bar-distribution checks.
-- `tests/fixtures/` — Torch-free parity data and its CPU PyTorch generator.
 
 ## Design notes
 

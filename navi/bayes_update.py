@@ -72,20 +72,6 @@ class AbstractProposal(eqx.Module):
                 )
 
 
-class AbstractAttentionBias(eqx.Module):
-    """Produce additive token-attention logits from aligned draws.
-
-    Implementations receive draws [N, K] and return a bias tensor
-    [1, heads, N, N] aligned with the mixer's query and key token axes.
-    Reordering draw columns together should preserve the bias up to roundoff.
-    """
-
-    @abstractmethod
-    def __call__(self, draws: Array) -> Array:
-        """Map a draw block [N, K] to bias [1, heads, N, N]."""
-        raise NotImplementedError
-
-
 class AbstractPooling(eqx.Module):
     """Summarize exchangeable draws conditioned on prefix features."""
 
@@ -146,88 +132,6 @@ class MeanPooling(AbstractPooling):
         product_scores = draw_values * prefix_multipliers[:, None, :]
         scores = (joint_scores + product_scores).mean(axis=0)
         return (draws @ scores) / draws.shape[1]
-
-
-@final
-class SecondMomentAttentionBias(AbstractAttentionBias):
-    """Map the empirical second moment to per-head attention logits.
-
-    Computes draws @ draws.T / K and applies a shared linear projection
-    to every entry of the resulting context-by-context matrix.
-
-    Args:
-        heads: Number of attention heads to produce biases for.
-        key: JAX PRNG key for initializing the projection.
-    """
-
-    projection: eqx.nn.Linear
-
-    def __init__(self, heads: int, *, key: Array):
-        self.projection = eqx.nn.Linear(
-            1, heads, use_bias=False, dtype=jnp.float32, key=key
-        )
-
-    def __call__(self, draws: Array) -> Array:
-        moment = (draws @ draws.T) / draws.shape[1]
-        bias = jax.vmap(jax.vmap(self.projection))(moment[..., None])
-        return bias.transpose(2, 0, 1)[None]
-
-
-@final
-class AttentionProposal(AbstractProposal):
-    """Propose one candidate from the latest snapshot and a joint draw block.
-
-    Token attention mixes the latest embeddings, observations, and per-token
-    mean squared draws. The output projection returns a raw candidate [N, D].
-
-    Args:
-        state_width: Context embedding and candidate width D.
-        width: Hidden token width of the attention mixer.
-        heads: Number of token-attention heads. Must divide width.
-        pre_norm: Whether to normalize before attention and MLP operations.
-        key: JAX PRNG key for initializing the proposal.
-        attention_bias: Optional module producing additive logits for the
-            mixer's heads and context rows from the same draw block.
-    """
-
-    state_width: int = eqx.field(static=True)
-    history_capacity: int = eqx.field(static=True, init=False, default=1)
-    input_projection: eqx.nn.Linear
-    attention_bias: AbstractAttentionBias | None
-    mixer: _Block
-    output_projection: eqx.nn.Linear
-
-    def __init__(
-        self, state_width, width, heads, *, pre_norm, key, attention_bias=None
-    ):
-        if any(
-            type(size) is not int or size < 1 for size in (state_width, width, heads)
-        ):
-            raise ValueError("proposal dimensions must be positive integers")
-        if width % heads:
-            raise ValueError("width must be divisible by heads")
-        if not isinstance(pre_norm, bool):
-            raise TypeError("pre_norm must be a bool")
-        self.state_width = state_width
-        first, middle, last = jax.random.split(key, 3)
-        self.input_projection = eqx.nn.Linear(
-            state_width + 2, width, key=first, dtype=jnp.float32
-        )
-        self.attention_bias = attention_bias
-        self.mixer = _Block(
-            width, heads, 2 * width, zero_init=False, pre_norm=pre_norm, key=middle
-        )
-        self.output_projection = eqx.nn.Linear(
-            width, state_width, key=last, dtype=jnp.float32
-        )
-
-    def __call__(self, history, valid, draws, observations):
-        draw_energy = jnp.mean(jnp.square(draws), axis=1, keepdims=True)
-        inputs = jnp.concatenate((history[-1], draw_energy, observations), axis=1)
-        tokens = jax.vmap(self.input_projection)(inputs)
-        bias = None if self.attention_bias is None else self.attention_bias(draws)
-        hidden = self.mixer(tokens, bias=bias)
-        return jax.vmap(self.output_projection)(hidden)
 
 
 @final

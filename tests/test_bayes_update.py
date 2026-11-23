@@ -7,16 +7,13 @@ import numpy as np
 import pytest
 
 from navi import (
-    AbstractAttentionBias,
     AbstractIntegrator,
     AbstractPooling,
     AbstractProposal,
-    AttentionProposal,
     AxialAttentionProposal,
     BarPredictor,
     BayesUpdate,
     MeanPooling,
-    SecondMomentAttentionBias,
     TanhRunningMeanIntegrator,
     advance_chunk,
     rollout_loss,
@@ -24,21 +21,11 @@ from navi import (
 from navi.training import prefix_mask
 
 
-def _fixture(axial=False):
-    keys = jax.random.split(jax.random.key(17), 7)
-    if axial:
-        proposal = AxialAttentionProposal(
-            3, 8, 2, history_capacity=3, pre_norm=True, depth=2, key=keys[0]
-        )
-    else:
-        proposal = AttentionProposal(
-            3,
-            8,
-            2,
-            pre_norm=True,
-            key=keys[0],
-            attention_bias=SecondMomentAttentionBias(2, key=keys[6]),
-        )
+def _fixture():
+    keys = jax.random.split(jax.random.key(17), 6)
+    proposal = AxialAttentionProposal(
+        3, 8, 2, history_capacity=3, pre_norm=True, depth=2, key=keys[0]
+    )
     update = BayesUpdate(proposal, TanhRunningMeanIntegrator())
     predictor = BarPredictor(
         state_width=3,
@@ -117,25 +104,6 @@ def test_history_startup_rollover_and_chunk_continuation():
     np.testing.assert_array_equal(whole.history[:, 0, 0], [5, 20, 75])
     np.testing.assert_array_equal(whole.valid, [True, True, True])
     assert whole.step == whole.draw_count == 4
-
-
-def test_attention_proposal_accepts_alternative_bias_or_no_bias():
-    @final
-    class DrawMeanBias(AbstractAttentionBias):
-        def __call__(self, draws):
-            mean = draws.mean(axis=1)
-            return jnp.broadcast_to(jnp.outer(mean, mean), (1, 2, len(mean), len(mean)))
-
-    _, _, y, _, _, draws = _fixture()
-    block = draws[0]
-    key = jax.random.key(24)
-    plain = AttentionProposal(3, 8, 2, pre_norm=True, key=key)
-    biased = AttentionProposal(
-        3, 8, 2, pre_norm=True, key=key, attention_bias=DrawMeanBias()
-    )
-    args = (jnp.zeros((1, len(y), 3)), jnp.array([True]), block.T, y)
-    assert plain(*args).shape == biased(*args).shape == (len(y), 3)
-    assert not np.allclose(plain(*args), biased(*args))
 
 
 def test_joint_proposal_uses_draw_alignment_and_ignores_draw_order():
@@ -333,7 +301,7 @@ def test_axial_layers_are_causal_and_match_full_grid(depth):
 
 
 def test_axial_proposal_validates_configuration_and_respects_history_mask():
-    update, _, observations, _, _, draws = _fixture(axial=True)
+    update, _, observations, _, _, draws = _fixture()
     proposal = update.proposal
     kwargs = {"history_capacity": 3, "pre_norm": True, "key": jax.random.key(29)}
     for overrides, match in (
@@ -375,7 +343,7 @@ def test_axial_proposal_validates_configuration_and_respects_history_mask():
 
 @pytest.mark.parametrize("block_size", [1, 2])
 def test_axial_rollout_matches_chunked_history(block_size):
-    update, _, y, _, _, draws = _fixture(axial=True)
+    update, _, y, _, _, draws = _fixture()
     sequence = draws[:, 0] if block_size == 1 else draws
     carry = update.initial_state(len(y))
     advance = eqx.filter_jit(advance_chunk)
@@ -390,9 +358,8 @@ def test_axial_rollout_matches_chunked_history(block_size):
     assert whole.draw_count == len(sequence) * block_size
 
 
-@pytest.mark.parametrize("axial", [False, True], ids=["single_snapshot", "axial"])
-def test_update_and_predictor_have_context_permutation_symmetry(axial):
-    update, predictor, y, u, pairs, draws = _fixture(axial)
+def test_update_and_predictor_have_context_permutation_symmetry():
+    update, predictor, y, u, pairs, draws = _fixture()
     initial = update.initial_state(len(y))
     order = jnp.array([2, 0, 3, 1])
     carry = advance_chunk(update, initial, draws[:2], y)
@@ -412,10 +379,9 @@ def test_update_and_predictor_have_context_permutation_symmetry(axial):
     )
 
 
-@pytest.mark.parametrize("axial", [False, True], ids=["single_snapshot", "axial"])
 @jax.default_matmul_precision("highest")
-def test_scored_rollout_matches_manual_prefixes_and_batches(axial):
-    update, predictor, y, u, pairs, draws = _fixture(axial)
+def test_scored_rollout_matches_manual_prefixes_and_batches():
+    update, predictor, y, u, pairs, draws = _fixture()
     targets = jnp.array([0.2, -0.1])
     loss = predictor.distribution.loss
     for horizon, expected in ((1, [1]), (4, [1, 2, 4]), (5, [1, 2, 4, 5])):
@@ -443,9 +409,8 @@ def test_scored_rollout_matches_manual_prefixes_and_batches(axial):
         eqx.filter_jit(score)(draws, jnp.int32(0)).block_until_ready()
 
 
-@pytest.mark.parametrize("axial", [False, True], ids=["single_snapshot", "axial"])
-def test_late_loss_differentiates_through_early_draw_and_both_networks(axial):
-    update, predictor, y, u, pairs, draws = _fixture(axial)
+def test_late_loss_differentiates_through_early_draw_and_both_networks():
+    update, predictor, y, u, pairs, draws = _fixture()
     targets = jnp.array([0.2, -0.1])
 
     def score(inputs):
@@ -464,13 +429,12 @@ def test_late_loss_differentiates_through_early_draw_and_both_networks(axial):
         )
 
     grads = eqx.filter_jit(eqx.filter_grad(score))((update, predictor, draws[0]))
-    if axial:
-        proposal_grad = grads[0].proposal
-        grads += (
-            proposal_grad.pooling.scorer,
-            proposal_grad.pooling.prefix_scorer,
-            proposal_grad.layers,
-        )
+    proposal_grad = grads[0].proposal
+    grads += (
+        proposal_grad.pooling.scorer,
+        proposal_grad.pooling.prefix_scorer,
+        proposal_grad.layers,
+    )
     for tree in grads:
         leaves = jax.tree.leaves(tree)
         assert all(np.isfinite(value).all() for value in leaves)
