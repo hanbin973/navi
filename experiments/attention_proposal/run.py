@@ -27,6 +27,8 @@ from navi import (
     AxialAttentionProposal,
     BarPredictor,
     BayesUpdate,
+    LastContextQueryDecoder,
+    NoContextEncoder,
     TanhRunningMeanIntegrator,
     rollout_loss,
 )
@@ -198,6 +200,12 @@ def parse_args(argv=None):
     parser.add_argument("--axial-depth", type=int, default=1)
     parser.add_argument("--history-capacity", type=int, default=3)
     parser.add_argument("--query-depth", type=int, default=3)
+    parser.add_argument(
+        "--readout",
+        choices=("alternating", "no-context-last-context"),
+        default="alternating",
+        help="use the alternating readout or read committed embeddings directly",
+    )
     parser.add_argument("--context-count", type=int, default=64)
     parser.add_argument("--features", type=int, default=16)
     parser.add_argument("--queries", type=int, default=8)
@@ -262,17 +270,32 @@ def run(args):
         ),
         TanhRunningMeanIntegrator(),
     )
-    predictor = BarPredictor(
-        state_width=args.state_width,
-        width=args.width,
-        num_heads=args.heads,
-        query_depth=args.query_depth,
-        pre_norm=True,
-        zero_init=False,
-        use_gram_bias=False,
-        bin_edges=edges,
-        key=predictor_key,
-    )
+    if args.readout == "no-context-last-context":
+        encoder = NoContextEncoder(args.state_width)
+        decoder = LastContextQueryDecoder(
+            width=args.width,
+            context_width=encoder.context_width,
+            num_heads=args.heads,
+            query_depth=args.query_depth,
+            num_context_states=encoder.num_context_states,
+            out_size=len(edges) - 1,
+            pre_norm=True,
+            zero_init=False,
+            key=predictor_key,
+        )
+        predictor = BarPredictor.from_components(encoder, decoder, bin_edges=edges)
+    else:
+        predictor = BarPredictor(
+            state_width=args.state_width,
+            width=args.width,
+            num_heads=args.heads,
+            query_depth=args.query_depth,
+            pre_norm=True,
+            zero_init=False,
+            use_gram_bias=False,
+            bin_edges=edges,
+            key=predictor_key,
+        )
     models = (update, predictor)
     learning_rate, rate_metadata = make_learning_rate(args)
     optimizer = optax.adam(learning_rate)
@@ -285,6 +308,9 @@ def run(args):
         "checkpoint_version": 2,
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "pre_norm": True,
+        "context_encoder": type(predictor.encoder).__name__,
+        "query_decoder": type(predictor.decoder).__name__,
+        "context_width": predictor.encoder.context_width,
         "bin_edges": edges,
         "time_slices": args.history_capacity + 1,
         "parameter_count": sum(leaf.size for leaf in jax.tree.leaves(params)),

@@ -140,7 +140,12 @@ def test_no_context_encoder_passes_embeddings_to_either_decoder():
     pairs = jnp.ones((2, 3, 1))
     for decoder in (
         AlternatingQueryDecoder(query_depth=1, **options),
-        LastContextQueryDecoder(query_depth=2, num_context_states=1, **options),
+        LastContextQueryDecoder(
+            query_depth=2,
+            num_context_states=1,
+            context_width=4,
+            **(options | {"width": 6}),
+        ),
     ):
         predictor = BarPredictor.from_components(encoder, decoder, bin_edges=(-2, 0, 2))
         logits = eqx.filter_jit(predictor.predict)(

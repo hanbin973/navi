@@ -247,7 +247,7 @@ class NoContextEncoder(AbstractContextEncoder):
 
 @final
 class AlternatingQueryDecoder(AbstractQueryDecoder):
-    """Read the corresponding cached context state at each query block."""
+    """Read each cached context state, projecting it to the query width."""
 
     context_width: int = eqx.field(static=True)
     num_context_states: int = eqx.field(static=True)
@@ -266,6 +266,7 @@ class AlternatingQueryDecoder(AbstractQueryDecoder):
         query_depth: int,
         out_size: int,
         key: Array,
+        context_width: int | None = None,
         hidden_size: int | None = None,
         zero_init: bool = True,
         pre_norm: bool = False,
@@ -278,7 +279,10 @@ class AlternatingQueryDecoder(AbstractQueryDecoder):
         if not math.isfinite(kernel_bias_init_scale) or kernel_bias_init_scale <= 0:
             raise ValueError("kernel_bias_init_scale must be finite and positive")
         hidden_size = _attention_hidden_size(width, num_heads, hidden_size, pre_norm)
-        self.context_width = width
+        context_width = width if context_width is None else context_width
+        if type(context_width) is not int or context_width < 1:
+            raise ValueError("context_width must be a positive integer")
+        self.context_width = context_width
         self.num_context_states = query_depth
         self.out_size = out_size
         layer_keys, _ = _readout_keys(key, query_depth)
@@ -300,7 +304,7 @@ class AlternatingQueryDecoder(AbstractQueryDecoder):
         )
         self.pair_encoders = tuple(
             _MLP(
-                width + 1,
+                context_width + 1,
                 hidden_size,
                 width,
                 bias=True,
@@ -353,6 +357,7 @@ class LastContextQueryDecoder(AbstractQueryDecoder):
         num_context_states: int,
         out_size: int,
         key: Array,
+        context_width: int | None = None,
         hidden_size: int | None = None,
         zero_init: bool = True,
         pre_norm: bool = False,
@@ -367,6 +372,7 @@ class LastContextQueryDecoder(AbstractQueryDecoder):
             query_depth=query_depth,
             out_size=out_size,
             key=key,
+            context_width=context_width,
             hidden_size=hidden_size,
             zero_init=zero_init,
             pre_norm=pre_norm,
