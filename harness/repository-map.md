@@ -51,6 +51,10 @@ changing them.
   dataset and `python -m experiments.attention_proposal.run` to train.
 - `experiments/attention_proposal/baselines.py` — factor-space Gaussian
   references and bar-projected NLL for held-out axial episodes.
+- `experiments/attention_proposal/correlation.py` — pooled held-out Pearson
+  correlation and prefix figures for posterior mean predictions.
+- `experiments/attention_proposal/replay_correlation.py` — Pearson figure
+  generation from saved online structured checkpoints.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
   and held-out extrapolation evaluation. Replay from the original commit.
 - `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322

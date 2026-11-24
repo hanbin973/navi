@@ -236,6 +236,17 @@ paired episode bootstrap intervals in `summary.json`. `prefix_nll.png`
 shows both reference levels. The oracle floor is an expected bar NLL,
 so an individual episode's realized gap can be negative.
 
+Each run also writes `prefix_pearson.csv` and `prefix_pearson.png`.
+At each prefix, Pearson correlation pools the paired posterior means
+and true targets across all held-out episodes and queries. The CSV
+records update steps and total joint draws. The oracle and identity
+reference lines use the means of their bar-projected distributions.
+The latent identity Gaussian itself has a constant zero mean, so its
+latent Pearson correlation is undefined. For completed online
+structured runs, `python -m experiments.attention_proposal.replay_correlation
+--output PATH RUN_DIR [RUN_DIR ...]` regenerates the figures from saved
+checkpoints and compares the runs by steps and by total draws.
+
 ## Offline generation and replay
 
 Run these commands from the repository root on an allocated compute node

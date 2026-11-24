@@ -21,6 +21,10 @@ from experiments.attention_proposal.baselines import (
     VARIANCE_GRID_SIZE,
     paired_bar_scores,
 )
+from experiments.attention_proposal.correlation import (
+    summarize_correlation,
+    write_correlation,
+)
 from experiments.modular_bayes.run import (
     _step_draws,
     checkpoints,
@@ -257,7 +261,11 @@ def evaluate(models, test_key, args, stored_split=None, spectrum=None):
             )
             observations, targets = episode.observations, episode.targets
             probe = structured_draws(
-                structured.context_factor, probe_key, jnp.uint32(0), length=32, k=args.k
+                structured.context_factor,
+                probe_key,
+                jnp.uint32(0),
+                length=32,
+                k=args.k,
             )
         elif stored_split is None:
             episode_key, diagnostic_key = jax.random.split(
@@ -273,22 +281,22 @@ def evaluate(models, test_key, args, stored_split=None, spectrum=None):
             )
             observations, targets = episode.observations, episode.targets
             probe = jax.device_put(stored_split.draws(episode_index, probe=True))
-        oracle_nll, identity_nll = map(
-            float,
-            jax.device_get(
-                paired_bar_scores(
-                    predictor.distribution,
-                    context_factor,
-                    query_factor,
-                    observations[:, 0],
-                    targets,
-                )
-            ),
+        oracle_nll, identity_nll, oracle_mean, identity_mean = jax.device_get(
+            paired_bar_scores(
+                predictor.distribution,
+                context_factor,
+                query_factor,
+                observations[:, 0],
+                targets,
+                return_means=True,
+            )
         )
+        oracle_nll, identity_nll = float(oracle_nll), float(identity_nll)
         if not np.isfinite((oracle_nll, identity_nll)).all():
             raise ValueError(
                 f"nonfinite Gaussian reference scores at episode {episode_index}"
             )
+        targets_host = np.asarray(targets)
         carry = update.initial_state(args.context_count)
         previous = 0
         for target in grid:
@@ -314,24 +322,44 @@ def evaluate(models, test_key, args, stored_split=None, spectrum=None):
                     )
             if stored_split is None and spectrum is None:
                 scores = score_prefix(
-                    update, predictor, carry, episode, diagnostic_key, args.k
+                    update,
+                    predictor,
+                    carry,
+                    episode,
+                    diagnostic_key,
+                    args.k,
+                    return_mean=True,
                 )
             else:
                 scores = score_prefix_from_draws(
-                    update, predictor, carry, *episode, probe
+                    update, predictor, carry, *episode, probe, return_mean=True
                 )
-            scores, draw_count = jax.device_get((scores, carry.draw_count))
-            nll, state_norm, drift_norm = map(float, scores)
+            scalars, prediction = scores[:-1], scores[-1]
+            scalars, prediction, draw_count = jax.device_get(
+                (scalars, prediction, carry.draw_count)
+            )
+            row = {
+                "episode": episode_index,
+                "t": target,
+                "draw_count": int(draw_count),
+                "nll": float(scalars[0]),
+                "prediction": prediction,
+                "oracle_mean": oracle_mean,
+                "identity_mean": identity_mean,
+                "targets": targets_host,
+            }
+            if not np.isfinite(prediction).all():
+                raise ValueError(
+                    f"nonfinite predictive mean at episode {episode_index}, prefix {target}"
+                )
+            nll, state_norm, drift_norm = map(float, scalars)
             if not np.isfinite((nll, state_norm, drift_norm)).all():
                 raise ValueError(
                     f"nonfinite evaluation at episode {episode_index}, prefix {target}"
                 )
             rows.append(
                 {
-                    "episode": episode_index,
-                    "t": target,
-                    "draw_count": int(draw_count),
-                    "nll": nll,
+                    **row,
                     "state_norm": state_norm,
                     "mean_drift_norm": drift_norm,
                     "oracle_nll": oracle_nll,
@@ -349,6 +377,17 @@ def write_evaluation(output, rows, t_max, bootstrap_seed):
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+
+    if "prediction" in rows[0]:
+        write_correlation(output, summarize_correlation(rows), t_max)
+        rows = [
+            {
+                key: value
+                for key, value in row.items()
+                if key not in ("prediction", "targets", "oracle_mean", "identity_mean")
+            }
+            for row in rows
+        ]
 
     with (output / "episodes.csv").open("w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=list(rows[0]))
@@ -564,35 +603,7 @@ def _shuffled_indices(size, seed):
         yield from rng.permutation(size)
 
 
-def run(args):
-    dataset = train_split = eval_split = None
-    spectrum = None
-    if args.dataset is not None:
-        dataset, train_split, eval_split = _open_dataset(args)
-    elif args.structured:
-        spectrum = jnp.asarray(power_law_eigenvalues(args.n, args.features, args.alpha))
-    device = jax.devices()[0]
-    if args.attention_backend is None:
-        cuda = (
-            device.platform == "gpu"
-            and "cuda" in device.client.platform_version.lower()
-        )
-        args.attention_backend = "cudnn" if args.structured and cuda else "xla"
-    if args.structured and args.episode_microbatch_size is None:
-        args.episode_microbatch_size = (
-            args.batch_size if args.attention_backend == "cudnn" else 1
-        )
-    args.output_dir.mkdir(parents=True, exist_ok=False)
-    bins, init, train, test, bootstrap = jax.random.split(jax.random.key(args.seed), 5)
-    if spectrum is not None:
-        calibration = structured_calibration_targets(
-            bins, spectrum, n=args.n, q=args.queries
-        )
-        edges = np.quantile(np.asarray(calibration), np.linspace(0, 1, 33)).tolist()
-    elif dataset is not None:
-        edges = dataset.bin_edges
-    else:
-        edges = prior_bin_edges(bins, jnp.empty((0, args.features), dtype=jnp.float32))
+def build_models(args, init, edges):
     # Preserve the original experiment's predictor initialization key.
     update_key, predictor_key, _, _ = jax.random.split(init, 4)
     update = BayesUpdate(
@@ -636,7 +647,40 @@ def run(args):
             key=predictor_key,
             attention_backend=args.attention_backend,
         )
-    models = (update, predictor)
+    return update, predictor
+
+
+def run(args):
+    dataset = train_split = eval_split = None
+    spectrum = None
+    if args.dataset is not None:
+        dataset, train_split, eval_split = _open_dataset(args)
+    elif args.structured:
+        spectrum = jnp.asarray(power_law_eigenvalues(args.n, args.features, args.alpha))
+    device = jax.devices()[0]
+    if args.attention_backend is None:
+        cuda = (
+            device.platform == "gpu"
+            and "cuda" in device.client.platform_version.lower()
+        )
+        args.attention_backend = "cudnn" if args.structured and cuda else "xla"
+    if args.structured and args.episode_microbatch_size is None:
+        args.episode_microbatch_size = (
+            args.batch_size if args.attention_backend == "cudnn" else 1
+        )
+    args.output_dir.mkdir(parents=True, exist_ok=False)
+    bins, init, train, test, bootstrap = jax.random.split(jax.random.key(args.seed), 5)
+    if spectrum is not None:
+        calibration = structured_calibration_targets(
+            bins, spectrum, n=args.n, q=args.queries
+        )
+        edges = np.quantile(np.asarray(calibration), np.linspace(0, 1, 33)).tolist()
+    elif dataset is not None:
+        edges = dataset.bin_edges
+    else:
+        edges = prior_bin_edges(bins, jnp.empty((0, args.features), dtype=jnp.float32))
+    models = build_models(args, init, edges)
+    _, predictor = models
     learning_rate, rate_metadata = make_learning_rate(args)
     optimizer = optax.adam(learning_rate)
     params = eqx.filter(models, eqx.is_inexact_array)

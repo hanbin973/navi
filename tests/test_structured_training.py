@@ -184,9 +184,9 @@ def test_structured_online_runner_uses_no_dataset_or_legacy_simulation(
     baselines = runner.paired_bar_scores
     scored_episodes = []
 
-    def score_once(*args):
-        scores = baselines(*args)
-        scored_episodes.append(scores)
+    def score_once(*args, **kwargs):
+        scores = baselines(*args, **kwargs)
+        scored_episodes.append(scores[:2])
         return scores
 
     monkeypatch.setattr(runner, "paired_bar_scores", score_once)

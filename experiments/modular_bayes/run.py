@@ -196,7 +196,9 @@ def stream_chunk(update, carry, episode, length, block_size):
 
 
 @eqx.filter_jit
-def score_prefix(update, readout, carry, episode, diagnostic_key, block_size):
+def score_prefix(
+    update, readout, carry, episode, diagnostic_key, block_size, *, return_mean=False
+):
     draws = _step_draws(
         episode.panel, diagnostic_key, jnp.arange(32, dtype=jnp.uint32), block_size
     )
@@ -209,20 +211,26 @@ def score_prefix(update, readout, carry, episode, diagnostic_key, block_size):
         episode.pairs,
         episode.targets,
         draws,
+        return_mean=return_mean,
     )
 
 
 @eqx.filter_jit
-def score_prefix_from_draws(update, readout, carry, y, u, pairs, targets, draws):
+def score_prefix_from_draws(
+    update, readout, carry, y, u, pairs, targets, draws, *, return_mean=False
+):
     snapshot = update.snapshot(carry, y)
     context = readout.encode_context(snapshot)
-    nll = readout.distribution.loss(readout.predict(context, u, pairs), targets)
+    logits = readout.predict(context, u, pairs)
+    nll = readout.distribution.loss(logits, targets)
     drifts = jax.vmap(update.drift, in_axes=(None, 0, None))(carry, draws, y)
-    return (
+    scores = (
         nll,
         jnp.linalg.norm(snapshot.embeddings),
         jnp.linalg.norm(drifts.mean(axis=0)),
     )
+
+    return (*scores, readout.distribution.mean(logits)) if return_mean else scores
 
 
 def checkpoints(t_max, multiplier):

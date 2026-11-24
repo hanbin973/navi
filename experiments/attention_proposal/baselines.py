@@ -82,7 +82,13 @@ def _normal_bar_log_masses(means, variances, edges):
 
 @eqx.filter_jit
 def paired_bar_scores(
-    distribution, context_factor, query_factor, observations, targets
+    distribution,
+    context_factor,
+    query_factor,
+    observations,
+    targets,
+    *,
+    return_means=False,
 ):
     """Score the kernel posterior mixture and an identity-kernel variance plug-in."""
     genetic, residual = _variance_grid(context_factor.dtype)
@@ -107,6 +113,14 @@ def paired_bar_scores(
     identity_logits = _normal_bar_log_masses(
         jnp.zeros_like(targets), genetic_plugin * query_self_kernel, edges
     )
-    return distribution.loss(oracle_logits, targets), distribution.loss(
-        identity_logits, targets
+    scores = (
+        distribution.loss(oracle_logits, targets),
+        distribution.loss(identity_logits, targets),
     )
+    if return_means:
+        return (
+            *scores,
+            distribution.mean(oracle_logits),
+            distribution.mean(identity_logits),
+        )
+    return scores
