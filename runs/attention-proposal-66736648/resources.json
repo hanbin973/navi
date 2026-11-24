@@ -1,0 +1,5 @@
+{
+  "training_seconds": 8076.68616976589,
+  "evaluation_seconds": 82.50303185731173,
+  "peak_device_bytes_in_use": 30813089536
+}
