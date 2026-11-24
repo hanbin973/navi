@@ -16,6 +16,9 @@ changing them.
 - `AGENTS.md` — repository-wide agent instructions and task routing.
 - `harness/environment.md` — uv environment and dependency guidance.
 - `harness/development.md` — development checks and verification expectations.
+- `harness/latest_baseline.json` — copy of the designated baseline run's
+  `run.json` for comparing experiment configurations. Replace it when a new
+  baseline is designated.
 - `harness/pattern/equinox.md` — Equinox abstract/final module design pattern.
 - `harness/cluster.md` — cluster rules, job prerequisites, and template routing.
 - `harness/slurm/python.sbatch` — common launcher for Python scripts and modules, with optional GPU diagnostics.
