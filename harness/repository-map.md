@@ -31,6 +31,8 @@ changing them.
 
 - `navi/bayes_update.py` — axial proposal, prefix-conditioned Deep Sets draw
   pooling, proposal and integrator interfaces, and recurrent rollouts.
+- `navi/fixed_point.py` — per-draw axial equations, stochastic-approximation
+  integrators, and resumable pre-activation rollouts.
 - `navi/predictor.py` — context encoder and query decoder interfaces, readout
   components, and their composition into the bar predictor.
 - `navi/training.py` — draw-prefix selection and the training objective that composes updater and predictor.
@@ -63,6 +65,8 @@ changing them.
 - `experiments/gp_experiment/` — historical fixed-context Gaussian episode simulation,
   Navi training, and paired oracle evaluation. Replay from the original commit.
 - `tests/test_bayes_update.py` — integration, history, prefix loss, symmetry, and gradients.
+- `tests/test_fixed_point.py` — axial estimate and gradient parity, resumed
+  rollouts, readout bounding, and gain scheduling.
 - `tests/test_pfn_port.py` — block initialization, additive attention bias, and masking.
 - `tests/test_navi_helper.py` — kernel alignment, joint simulation, BLUP
   reference, and training episode checks.

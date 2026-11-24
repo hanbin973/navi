@@ -449,8 +449,10 @@ class BarPredictor(AbstractPredictor):
             additive context-attention bias when a Gram matrix is available.
         exact_kernel: Require a supplied context kernel at encoding time.
         attention_backend: JAX dot-product attention backend.
+        bound_embeddings: Apply tanh to snapshot embeddings before context encoding.
     """
 
+    bound_embeddings: bool = eqx.field(static=True)
     encoder: AbstractContextEncoder
     decoder: AbstractQueryDecoder
     distribution: FullSupportBarDistribution
@@ -472,8 +474,10 @@ class BarPredictor(AbstractPredictor):
         use_gram_bias: bool = True,
         exact_kernel: bool = False,
         attention_backend: str = "xla",
+        bound_embeddings: bool = False,
         _components: tuple[AbstractContextEncoder, AbstractQueryDecoder] | None = None,
     ):
+        self.bound_embeddings = bound_embeddings
         self.distribution = FullSupportBarDistribution(bin_edges)
         if _components is not None:
             self.encoder, self.decoder = _components
@@ -524,9 +528,14 @@ class BarPredictor(AbstractPredictor):
         decoder: AbstractQueryDecoder,
         *,
         bin_edges,
+        bound_embeddings: bool = False,
     ) -> "BarPredictor":
         """Compose a context encoder and query decoder with a bar distribution."""
-        return cls(bin_edges=bin_edges, _components=(encoder, decoder))
+        return cls(
+            bin_edges=bin_edges,
+            bound_embeddings=bound_embeddings,
+            _components=(encoder, decoder),
+        )
 
     @property
     def out_size(self):
@@ -536,6 +545,8 @@ class BarPredictor(AbstractPredictor):
         self, snapshot: ContextSnapshot, *, gram: Array | None = None
     ) -> Context:
         """Prepare a snapshot for reuse across query batches."""
+        if self.bound_embeddings:
+            snapshot = snapshot._replace(embeddings=jnp.tanh(snapshot.embeddings))
         return self.encoder(snapshot, gram=gram)
 
     def predict(self, encoded_context, query_features, pair_features):
