@@ -239,8 +239,9 @@ so an individual episode's realized gap can be negative.
 Each run also writes `prefix_pearson.csv` and `prefix_pearson.png`.
 At each prefix, Pearson correlation pools the paired posterior means
 and true targets across all held-out episodes and queries. The CSV
-records update steps and total joint draws. The oracle and identity
-reference lines use the means of their bar-projected distributions.
+records update steps and total joint draws. Both references use the
+means of their bar-projected distributions. The figures show the oracle
+reference, and the CSV also records the identity reference.
 The latent identity Gaussian itself has a constant zero mean, so its
 latent Pearson correlation is undefined. For completed online
 structured runs, `python -m experiments.attention_proposal.replay_correlation

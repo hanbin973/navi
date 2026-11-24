@@ -5,11 +5,6 @@ from collections import defaultdict
 
 import numpy as np
 
-REFERENCE_FIELDS = (
-    ("oracle_pearson_r", "Oracle (bar mean)", "--"),
-    ("identity_pearson_r", "K = I plug-in (bar mean)", ":"),
-)
-
 
 def pearson_r(targets, means):
     targets = np.concatenate(targets).astype(np.float64)
@@ -66,26 +61,26 @@ def plot_correlation(path, series, *, budget="t", t_max=None):
             "o-",
             label=label,
         )
-    for field, name, linestyle in REFERENCE_FIELDS:
-        values = [summary[0][field] for _, summary in series]
-        if all(value == values[0] for value in values):
-            references = [(name, values[0])]
+    name = "Oracle (bar mean)"
+    values = [summary[0]["oracle_pearson_r"] for _, summary in series]
+    if all(value == values[0] for value in values):
+        references = [(name, values[0])]
+    else:
+        references = [
+            (f"{name} · {label}", value)
+            for (label, _), value in zip(series, values, strict=True)
+        ]
+    for label, value in references:
+        if value is None:
+            ax.plot(
+                [],
+                [],
+                color="0.35",
+                linestyle="--",
+                label=f"{label}: undefined",
+            )
         else:
-            references = [
-                (f"{name} · {label}", value)
-                for (label, _), value in zip(series, values, strict=True)
-            ]
-        for label, value in references:
-            if value is None:
-                ax.plot(
-                    [],
-                    [],
-                    color="0.35",
-                    linestyle=linestyle,
-                    label=f"{label}: undefined",
-                )
-            else:
-                ax.axhline(value, color="0.35", linestyle=linestyle, label=label)
+            ax.axhline(value, color="0.35", linestyle="--", label=label)
     if t_max is not None:
         ax.axvline(t_max, color="0.5", linestyle="--", label="Training horizon")
     xlabel = "Update steps" if budget == "t" else "Total joint draws"
@@ -103,7 +98,8 @@ def write_correlation(output, summary, t_max):
                 "t",
                 "draw_count",
                 "pearson_r",
-                *(field for field, _, _ in REFERENCE_FIELDS),
+                "oracle_pearson_r",
+                "identity_pearson_r",
             ],
         )
         writer.writeheader()
