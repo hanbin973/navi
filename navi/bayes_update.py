@@ -8,7 +8,15 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from .blocks import _MLP, _Block, _features
+from .blocks import (
+    _MLP,
+    _Block,
+    _encode_axial_prefix,
+    _features,
+    _mix_time,
+    _temporal_mask,
+)
+from .fixed_point import ContextSnapshot
 
 
 class BayesCarry(NamedTuple):
@@ -25,20 +33,6 @@ class BayesCarry(NamedTuple):
     history: Array
     valid: Array
     step: Array
-    draw_count: Array
-
-
-class ContextSnapshot(NamedTuple):
-    """Aligned predictor inputs at one rollout prefix.
-
-    Attributes:
-        observations: Context observations [N, 1].
-        embeddings: Latest committed context embeddings [N, D].
-        draw_count: Scalar count of joint draws consumed at this prefix.
-    """
-
-    observations: Array
-    embeddings: Array
     draw_count: Array
 
 
@@ -220,36 +214,18 @@ class AxialAttentionProposal(AbstractProposal):
         if self.pooling.output_width != self.history_projection.out_features:
             raise ValueError("pool output width must match the proposal width")
 
-    @staticmethod
-    def _temporal_mask(valid):
-        causal = jnp.tri(valid.size, dtype=bool)
-        allowed = jnp.where(
-            valid[:, None], causal & valid[None, :], jnp.eye(valid.size, dtype=bool)
-        )
-        return allowed[None, None]
-
-    @staticmethod
-    def _mix_time(block, tokens, mask, valid):
-        mixed = jax.vmap(lambda row: block(row, mask=mask), in_axes=1, out_axes=1)(
-            tokens
-        )
-        return jnp.where(valid[:, None, None], mixed, 0)
+    _temporal_mask = staticmethod(_temporal_mask)
+    _mix_time = staticmethod(_mix_time)
 
     def _encode_prefix(self, history, valid, observations):
-        history = jnp.where(valid[:, None, None], history, 0)
-        past = jax.vmap(jax.vmap(self.history_projection))(history)
-        observed = jax.vmap(self.observation_projection)(observations)
-        tokens = jnp.concatenate((past, observed[None]), axis=0)
-        valid = jnp.concatenate((valid, jnp.ones((1,), dtype=bool)))
-        mask = self._temporal_mask(valid)
-
-        for temporal, context in self.layers[:-1]:
-            tokens = self._mix_time(temporal, tokens, mask, valid)
-            tokens = jnp.where(valid[:, None, None], jax.vmap(context)(tokens), 0)
-
-        temporal, context = self.layers[-1]
-        tokens = self._mix_time(temporal, tokens, mask, valid)
-        return context(tokens[-1])
+        return _encode_axial_prefix(
+            history,
+            valid,
+            observations,
+            self.history_projection,
+            self.observation_projection,
+            self.layers,
+        )
 
     def __call__(self, history, valid, draws, observations):
         prefix_features = self._encode_prefix(history, valid, observations)

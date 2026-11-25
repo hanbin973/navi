@@ -167,6 +167,38 @@ class _Block(eqx.Module):
         return jax.vmap(self.mlp_norm)(tokens + jax.vmap(self.mlp)(tokens))
 
 
+def _temporal_mask(valid):
+    causal = jnp.tri(valid.size, dtype=bool)
+    allowed = jnp.where(
+        valid[:, None], causal & valid[None, :], jnp.eye(valid.size, dtype=bool)
+    )
+    return allowed[None, None]
+
+
+def _mix_time(block, tokens, mask, valid):
+    mixed = jax.vmap(lambda row: block(row, mask=mask), in_axes=1, out_axes=1)(tokens)
+    return jnp.where(valid[:, None, None], mixed, 0)
+
+
+def _encode_axial_prefix(
+    history, valid, observations, history_projection, observation_projection, layers
+):
+    history = jnp.where(valid[:, None, None], history, 0)
+    past = jax.vmap(jax.vmap(history_projection))(history)
+    observed = jax.vmap(observation_projection)(observations)
+    tokens = jnp.concatenate((past, observed[None]), axis=0)
+    valid = jnp.concatenate((valid, jnp.ones((1,), dtype=bool)))
+    mask = _temporal_mask(valid)
+
+    for temporal, context in layers[:-1]:
+        tokens = _mix_time(temporal, tokens, mask, valid)
+        tokens = jnp.where(valid[:, None, None], jax.vmap(context)(tokens), 0)
+
+    temporal, context = layers[-1]
+    tokens = _mix_time(temporal, tokens, mask, valid)
+    return context(tokens[-1])
+
+
 def _features(values, shape, name):
     if values.shape != shape:
         raise ValueError(f"{name} must have shape {shape}, got {values.shape}")

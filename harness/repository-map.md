@@ -31,10 +31,14 @@ changing them.
 
 - `navi/bayes_update.py` — axial proposal, prefix-conditioned Deep Sets draw
   pooling, proposal and integrator interfaces, and recurrent rollouts.
+- `navi/fixed_point.py` — per-draw axial equations, stochastic-approximation
+  integrators, resumable rollouts, and the shared context snapshot.
+- `navi/averaging.py` — uniform and linearly weighted Polyak–Ruppert
+  averaging for fixed-point snapshots.
 - `navi/predictor.py` — context encoder and query decoder interfaces, readout
   components, and their composition into the bar predictor.
 - `navi/training.py` — draw-prefix selection and the training objective that composes updater and predictor.
-- `navi/blocks.py` — shared dense PFNs attention, MLP, and Transformer blocks.
+- `navi/blocks.py` — shared dense PFNs attention, MLP, Transformer blocks, and axial prefix encoding.
 - `navi/helper.py` — abstract query kernel and dataset simulator interfaces,
   Gaussian reference helpers, and model-independent training episode assembly.
 - `navi/simulation.py` — power-law spectral factors, joint Gaussian traits,
@@ -55,6 +59,11 @@ changing them.
   correlation and prefix figures for posterior mean predictions.
 - `experiments/attention_proposal/replay_correlation.py` — Pearson figure
   generation from saved online structured checkpoints.
+- `experiments/fixed_point/` — fixed-point training, prefix evaluation,
+  dataset generation, and structured checkpoint replay. Run
+  `python -m experiments.fixed_point.run` with `--integrator running-mean`
+  (the default), `--integrator polynomial`, or `--integrator averaging`
+  for polynomial updates with uniform iterate averaging.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
   and held-out extrapolation evaluation. Replay from the original commit.
 - `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322
@@ -63,6 +72,8 @@ changing them.
 - `experiments/gp_experiment/` — historical fixed-context Gaussian episode simulation,
   Navi training, and paired oracle evaluation. Replay from the original commit.
 - `tests/test_bayes_update.py` — integration, history, prefix loss, symmetry, and gradients.
+- `tests/test_fixed_point.py` — axial estimate and gradient parity, resumed
+  rollouts, readout bounding, and gain scheduling.
 - `tests/test_pfn_port.py` — block initialization, additive attention bias, and masking.
 - `tests/test_navi_helper.py` — kernel alignment, joint simulation, BLUP
   reference, and training episode checks.
