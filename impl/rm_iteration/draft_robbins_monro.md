@@ -7,7 +7,7 @@ iteration over prior draws. It follows the carry and module composition in
 
 ## Update convention
 
-The carry stores a pre-activation iterate `a` with shape `[N, D]`. Each
+The carry stores a iterate `a` with shape `[N, D]`. Each
 block supplies `K` joint draws over the same `N` context rows. The equation
 encodes the committed history once to build a draw-independent
 context `c`. With `n_t` denoting the cumulative draw count after the block,
@@ -37,7 +37,7 @@ the committed history.
 
 | Field | Contract |
 | --- | --- |
-| `history` | Float32 `[H, N, D]` pre-activation iterates in right-aligned history slots, newest last. |
+| `history` | Float32 `[H, N, D]` iterates in right-aligned history slots, newest last. |
 | `valid` | Boolean `[H]` mask of initialized slots. |
 | `step` | Scalar int32 count of committed draw blocks. |
 | `draw_count` | Scalar int32 count of individual joint draws consumed. |
@@ -102,17 +102,16 @@ set to zero. It requires at least one context row.
   new carry and drift.
 - `drift` evaluates the same update against a fixed carry without a commit.
 - `snapshot` returns a `ContextSnapshot` with observations, the latest
-  pre-activation iterate as `embeddings`, and the cumulative draw count.
+  iterate as `embeddings`, and the cumulative draw count.
 - `advance_chunk` scans over `[T, N]` single draws or `[T, K, N]` blocks
   and returns the final carry.
 
 ## Restructuring the concrete Bayesian updater
 
 The port reuses the axial encoder, both pooling MLPs, and the
-output projection from [bayes_update.py](../../navi/bayes_update.py). The
-running estimate lives in pre-activation space. For this port, the predictor
-readout applies elementwise `tanh` to the snapshot embeddings before
-decoding. The axial port independently bounds its history inputs
+output projection from [bayes_update.py](../../navi/bayes_update.py). For
+this port, the predictor readout applies elementwise `tanh` to the snapshot
+embeddings before decoding. The axial port independently bounds its history inputs
 inside `encode` to retain the existing encoder's bounded input convention.
 
 ### MeanPooling → JointDrawConditioner
@@ -157,9 +156,9 @@ block. Only the single-draw computations are mapped over draws.
 ### TanhRunningMeanIntegrator → RunningMeanIntegrator
 
 Use the existing fixed-point `RunningMeanIntegrator` for the running-mean
-configuration. It applies `K / n_t` to the pre-activation drift. With
+configuration. It applies `K / n_t` to the drift. With
 constant block size this is the old `1 / t` gain. The readout applies
-`tanh` to the committed pre-activation iterate, so multi-block trajectories
+`tanh` to the committed iterate, so multi-block trajectories
 generally differ from the original running mean of bounded candidates.
 Any nonlinear transform intended to act on each draw before averaging
 belongs in `per_draw`.
@@ -169,7 +168,7 @@ Compose the port as
 Construct the bar readout with `bound_embeddings=True` to bound the raw
 snapshot embeddings before context encoding.
 The snapshot still carries the predictor's observations, embeddings, and
-draw count. The pre-activation carry and drift have new semantics, so
+draw count. The carry and drift use the raw iterate, so
 resume fixed-point rollouts from a carry produced by the new updater.
 
 ## Interface checks for implementation

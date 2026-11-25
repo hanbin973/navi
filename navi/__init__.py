@@ -7,12 +7,12 @@ from .bayes_update import (
     AxialAttentionProposal,
     BayesCarry,
     BayesUpdate,
-    ContextSnapshot,
     MeanPooling,
     TanhRunningMeanIntegrator,
     advance_chunk,
 )
 from .distribution import FullSupportBarDistribution
+from .fixed_point import ContextSnapshot
 from .predictor import (
     AbstractContextEncoder,
     AbstractPredictor,

@@ -10,9 +10,9 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from .bayes_update import ContextSnapshot
 from .blocks import _MLP, _Block, _features
 from .distribution import FullSupportBarDistribution
+from .fixed_point import ContextSnapshot
 
 Context = tuple[Array, ...]
 

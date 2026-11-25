@@ -32,11 +32,11 @@ changing them.
 - `navi/bayes_update.py` — axial proposal, prefix-conditioned Deep Sets draw
   pooling, proposal and integrator interfaces, and recurrent rollouts.
 - `navi/fixed_point.py` — per-draw axial equations, stochastic-approximation
-  integrators, and resumable pre-activation rollouts.
+  integrators, resumable rollouts, and the shared context snapshot.
 - `navi/predictor.py` — context encoder and query decoder interfaces, readout
   components, and their composition into the bar predictor.
 - `navi/training.py` — draw-prefix selection and the training objective that composes updater and predictor.
-- `navi/blocks.py` — shared dense PFNs attention, MLP, and Transformer blocks.
+- `navi/blocks.py` — shared dense PFNs attention, MLP, Transformer blocks, and axial prefix encoding.
 - `navi/helper.py` — abstract query kernel and dataset simulator interfaces,
   Gaussian reference helpers, and model-independent training episode assembly.
 - `navi/simulation.py` — power-law spectral factors, joint Gaussian traits,

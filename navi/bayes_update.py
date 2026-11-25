@@ -8,7 +8,15 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from .blocks import _MLP, _Block, _features
+from .blocks import (
+    _MLP,
+    _Block,
+    _encode_axial_prefix,
+    _features,
+    _mix_time,
+    _temporal_mask,
+)
+from .fixed_point import ContextSnapshot
 
 
 class BayesCarry(NamedTuple):
@@ -25,20 +33,6 @@ class BayesCarry(NamedTuple):
     history: Array
     valid: Array
     step: Array
-    draw_count: Array
-
-
-class ContextSnapshot(NamedTuple):
-    """Aligned predictor inputs at one rollout prefix.
-
-    Attributes:
-        observations: Context observations [N, 1].
-        embeddings: Latest committed context embeddings [N, D].
-        draw_count: Scalar count of joint draws consumed at this prefix.
-    """
-
-    observations: Array
-    embeddings: Array
     draw_count: Array
 
 
@@ -132,38 +126,6 @@ class MeanPooling(AbstractPooling):
         product_scores = draw_values * prefix_multipliers[:, None, :]
         scores = (joint_scores + product_scores).mean(axis=0)
         return (draws @ scores) / draws.shape[1]
-
-
-def _temporal_mask(valid):
-    causal = jnp.tri(valid.size, dtype=bool)
-    allowed = jnp.where(
-        valid[:, None], causal & valid[None, :], jnp.eye(valid.size, dtype=bool)
-    )
-    return allowed[None, None]
-
-
-def _mix_time(block, tokens, mask, valid):
-    mixed = jax.vmap(lambda row: block(row, mask=mask), in_axes=1, out_axes=1)(tokens)
-    return jnp.where(valid[:, None, None], mixed, 0)
-
-
-def _encode_axial_prefix(
-    history, valid, observations, history_projection, observation_projection, layers
-):
-    history = jnp.where(valid[:, None, None], history, 0)
-    past = jax.vmap(jax.vmap(history_projection))(history)
-    observed = jax.vmap(observation_projection)(observations)
-    tokens = jnp.concatenate((past, observed[None]), axis=0)
-    valid = jnp.concatenate((valid, jnp.ones((1,), dtype=bool)))
-    mask = _temporal_mask(valid)
-
-    for temporal, context in layers[:-1]:
-        tokens = _mix_time(temporal, tokens, mask, valid)
-        tokens = jnp.where(valid[:, None, None], jax.vmap(context)(tokens), 0)
-
-    temporal, context = layers[-1]
-    tokens = _mix_time(temporal, tokens, mask, valid)
-    return context(tokens[-1])
 
 
 @final

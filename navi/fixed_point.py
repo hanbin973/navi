@@ -27,8 +27,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from .bayes_update import _encode_axial_prefix
-from .blocks import _MLP, _Block, _features
+from .blocks import _MLP, _Block, _encode_axial_prefix, _features
 
 EquationContext = Any
 """PyTree returned by ``AbstractEquation.encode`` and consumed by its terms."""
@@ -56,8 +55,8 @@ class ContextSnapshot(NamedTuple):
 
     Attributes:
         observations: Context observations [N, 1].
-        embeddings: Latest iterate [N, D], unread. The predictor applies its
-            own read map.
+        embeddings: Latest committed embeddings [N, D]. Fixed-point snapshots
+            contain the raw iterate for the predictor's readout.
         draw_count: Scalar count of joint draws consumed at this prefix.
     """
 
@@ -322,7 +321,7 @@ class AbstractIntegrator(eqx.Module):
 class RunningMeanIntegrator(AbstractIntegrator):
     """Use gain K / n_t, which weights block estimates by their draw counts.
 
-    Constant-size blocks give the 1/t gain on the pre-activation iterate.
+    Constant-size blocks give a gain of 1/t at block step t.
     """
 
     def gain(self, draw_count, block_size):
