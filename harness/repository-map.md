@@ -57,6 +57,10 @@ changing them.
   correlation and prefix figures for posterior mean predictions.
 - `experiments/attention_proposal/replay_correlation.py` — Pearson figure
   generation from saved online structured checkpoints.
+- `experiments/fixed_point/` — fixed-point training, prefix evaluation,
+  dataset generation, and structured checkpoint replay. Run
+  `python -m experiments.fixed_point.run` with `--integrator running-mean`
+  (the default) or `--integrator polynomial`.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
   and held-out extrapolation evaluation. Replay from the original commit.
 - `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322
