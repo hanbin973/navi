@@ -20,6 +20,8 @@ from experiments.refine_iteration.correlation import (
 )
 from experiments.refine_iteration.run import (
     CHECKPOINT_VERSION,
+    DRAW_BASES,
+    LEGACY_CHECKPOINT_VERSION,
     build_models,
     evaluate,
     sample_structured_episode,
@@ -84,16 +86,34 @@ def refresh_references(run, args, test, spectrum):
         ]
 
 
-def replay(run, *, references_only=False):
+def _checkpoint_args(run):
     args = Namespace(**json.loads((run / "run.json").read_text()))
-    if (
-        not args.structured
-        or args.dataset is not None
-        or args.checkpoint_version != CHECKPOINT_VERSION
-    ):
+    if not args.structured or args.dataset is not None:
         raise ValueError(
             f"{run} requires an online structured refine-iteration checkpoint"
         )
+    version = getattr(args, "checkpoint_version", None)
+    architecture = getattr(args, "draw_architecture", None)
+    if version == LEGACY_CHECKPOINT_VERSION and architecture in (
+        None,
+        "legacy",
+    ):
+        args.draw_architecture = "legacy"
+    elif not (
+        version == CHECKPOINT_VERSION
+        and architecture == "basis"
+        and getattr(args, "draw_basis", None) in tuple(DRAW_BASES)
+        and getattr(args, "draw_pool", None) == "mean"
+    ):
+        raise ValueError(
+            f"{run} has an unsupported refine-iteration checkpoint layout "
+            f"(version {version}, architecture {architecture!r})"
+        )
+    return args
+
+
+def replay(run, *, references_only=False):
+    args = _checkpoint_args(run)
     _, init, _, test, _ = jax.random.split(jax.random.key(args.seed), 5)
     spectrum = jnp.asarray(power_law_eigenvalues(args.n, args.features, args.alpha))
     if references_only:

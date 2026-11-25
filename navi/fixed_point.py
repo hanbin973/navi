@@ -9,15 +9,10 @@ estimate of its mean-field map
 An ``AbstractIntegrator`` steps the iterate toward that estimate with a
 scheduled gain, and ``FixedPointUpdate`` owns the carry.
 
-``MixerEquation`` builds both terms from transformer-style parts. Each context
-row is a token. The state path encodes the read state and observations once.
-Within one draw, every token fuses that row's draw value and encoded state
-before draw-specific mixing. ``MixerBlock`` alternates an
-``AbstractTokenMixer``, the only part that combines rows, with an
-``AbstractChannelMixer``, which acts on one token at a time. Draws never mix:
-each draw is processed alone, and the only operation across draws is the
-final mean. These rules hold for any prior, so changing the prior changes
-learned weights or hyperparameters, not wiring.
+``MixerEquation`` encodes the state once per block. Its draw path combines
+context-dependent coefficients with a scalar draw basis and pools over rows
+within each joint draw. The block reduction preserves the mean contribution
+of those joint draws.
 """
 
 from abc import abstractmethod
@@ -299,9 +294,9 @@ class AbstractEquation(eqx.Module):
     """Define a fixed-point equation through unbiased per-draw terms.
 
     Implementations supply a draw-free encoding of the history, a draw-free
-    term, and the term for a single draw. The shared ``__call__`` combines
-    them as the draw-free term plus the mean of the per-draw terms, so the
-    block estimate is unbiased for the mean-field map at every block size.
+    term, a single-draw term, and its block reduction. The shared ``__call__``
+    adds the draw-free term to the mean of the per-draw terms, so the block
+    estimate is unbiased for the mean-field map at every block size.
 
     Attributes:
         state_width: Width D of the iterate.
@@ -332,6 +327,11 @@ class AbstractEquation(eqx.Module):
         """Return the contribution of one draw [N], shaped [N, D]."""
         raise NotImplementedError
 
+    @abstractmethod
+    def mean_per_draw(self, context: EquationContext, draws: Array) -> Array:
+        """Return the mean of the single-draw terms for a nonempty block."""
+        raise NotImplementedError
+
     def __call__(
         self, history: Array, valid: Array, draws: Array, observations: Array
     ) -> Array:
@@ -341,8 +341,7 @@ class AbstractEquation(eqx.Module):
         shaped [N, D].
         """
         context = self.encode(history, valid, observations)
-        terms = jax.vmap(lambda draw: self.per_draw(context, draw))(draws)
-        return self.deterministic(context) + terms.mean(axis=0)
+        return self.deterministic(context) + self.mean_per_draw(context, draws)
 
     def __check_init__(self):
         for size in (self.state_width, self.history_capacity):
@@ -360,7 +359,7 @@ def _encode_tokens(embedding, blocks, features):
 
 
 @final
-class MixerEquation(AbstractEquation):
+class LegacyMixerEquation(AbstractEquation):
     """Build both terms from per-row tokens and mixer blocks.
 
     The equation reads only the latest iterate. Per row i, with read state
@@ -451,8 +450,11 @@ class MixerEquation(AbstractEquation):
         tokens = _encode_tokens(self.draw_embedding, self.draw_blocks, features)
         return self.draw_head.apply(tokens)
 
+    def mean_per_draw(self, context, draws):
+        return jax.vmap(self.per_draw, in_axes=(None, 0))(context, draws).mean(axis=0)
 
-def build_mixer_equation(
+
+def build_legacy_mixer_equation(
     state_width: int,
     width: int,
     *,
@@ -466,8 +468,8 @@ def build_mixer_equation(
     read: Callable[[Array], Array] = jnp.asarray,
     draw_embedding: AbstractChannelMixer | None = None,
     key: Array,
-) -> MixerEquation:
-    """Build a ``MixerEquation`` with gated channel mixers.
+) -> LegacyMixerEquation:
+    """Build the version-5 equation with gated channel mixers.
 
     Args:
         state_width: Width D of the iterate.
@@ -485,22 +487,6 @@ def build_mixer_equation(
         key: PRNG key.
     """
 
-    def make_blocks(depth, token_mixer, key):
-        if token_mixer not in ("mean", "attention"):
-            raise ValueError(f"unknown token mixer {token_mixer!r}")
-        blocks = []
-        for block_key in jax.random.split(key, depth):
-            mix_key, channel_key = jax.random.split(block_key)
-            if token_mixer == "mean":
-                mixer = MeanPoolTokenMixer(width, key=mix_key)
-            else:
-                mixer = AttentionTokenMixer(
-                    width, heads, backend=attention_backend, key=mix_key
-                )
-            channel = GatedChannelMixer(width, hidden_ratio * width, key=channel_key)
-            blocks.append(MixerBlock(mixer, channel))
-        return tuple(blocks)
-
     keys = jax.random.split(key, 6)
     if draw_embedding is None:
         draw_embedding = GatedChannelMixer(
@@ -508,15 +494,340 @@ def build_mixer_equation(
         )
     if draw_embedding.out_width != width:
         raise ValueError("draw embedding output width must match width")
-    return MixerEquation(
+    return LegacyMixerEquation(
         ElementwiseChannelMixer(state_width, read),
         draw_embedding,
-        make_blocks(draw_depth, draw_token_mixer, keys[1]),
+        _make_mixer_blocks(
+            width,
+            draw_depth,
+            draw_token_mixer,
+            heads,
+            attention_backend,
+            hidden_ratio,
+            keys[1],
+        ),
         LinearChannelMixer(width, state_width, key=keys[2]),
         LinearChannelMixer(state_width + 1, width, key=keys[3]),
-        make_blocks(state_depth, state_token_mixer, keys[4]),
+        _make_mixer_blocks(
+            width,
+            state_depth,
+            state_token_mixer,
+            heads,
+            attention_backend,
+            hidden_ratio,
+            keys[4],
+        ),
         LinearChannelMixer(width, state_width, key=keys[5]),
     )
+
+
+def _make_mixer_blocks(
+    width, depth, token_mixer, heads, attention_backend, hidden_ratio, key
+):
+    if token_mixer not in ("mean", "attention"):
+        raise ValueError(f"unknown token mixer {token_mixer!r}")
+    blocks = []
+    for block_key in jax.random.split(key, depth):
+        mix_key, channel_key = jax.random.split(block_key)
+        if token_mixer == "mean":
+            mixer = MeanPoolTokenMixer(width, key=mix_key)
+        else:
+            mixer = AttentionTokenMixer(
+                width, heads, backend=attention_backend, key=mix_key
+            )
+        channel = GatedChannelMixer(width, hidden_ratio * width, key=channel_key)
+        blocks.append(MixerBlock(mixer, channel))
+    return tuple(blocks)
+
+
+class AbstractStatePath(eqx.Module):
+    """Encode the committed state and produce its deterministic term."""
+
+    state_width: eqx.AbstractVar[int]
+    context_width: eqx.AbstractVar[int]
+
+    @abstractmethod
+    def encode(self, history: Array, valid: Array, observations: Array) -> Array:
+        """Encode the latest history slot and observations as [N, context_width]."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def deterministic(self, features: Array) -> Array:
+        """Project context features to [N, state_width]."""
+        raise NotImplementedError
+
+
+@final
+class MixerStatePath(AbstractStatePath):
+    """Read the masked latest iterate and mix its tokens with observations."""
+
+    read: AbstractChannelMixer
+    embedding: AbstractChannelMixer
+    blocks: tuple[MixerBlock, ...] = eqx.field(converter=tuple)
+    head: AbstractChannelMixer
+
+    @property
+    def state_width(self) -> int:
+        return self.read.out_width
+
+    @property
+    def context_width(self) -> int:
+        return self.embedding.out_width
+
+    def __check_init__(self):
+        if self.read.in_width != self.state_width:
+            raise ValueError("read must map the state width to itself")
+        if self.embedding.in_width != self.state_width + 1:
+            raise ValueError(
+                "state embedding must accept the read state and observation"
+            )
+        if any(block.width != self.context_width for block in self.blocks):
+            raise ValueError("state blocks must match the context width")
+        if (self.head.in_width, self.head.out_width) != (
+            self.context_width,
+            self.state_width,
+        ):
+            raise ValueError("state head must map context width to state width")
+
+    def encode(self, history, valid, observations):
+        latest = jnp.where(valid[-1], history[-1], 0)
+        features = jnp.concatenate((self.read.apply(latest), observations), axis=-1)
+        return _encode_tokens(self.embedding, self.blocks, features)
+
+    def deterministic(self, features):
+        return self.head.apply(features)
+
+
+class AbstractDrawBasis(eqx.Module):
+    """Map a scalar draw value to features independently of the context."""
+
+    width: eqx.AbstractVar[int]
+
+    @abstractmethod
+    def __call__(self, value: Array) -> Array:
+        """Return basis values shaped [width] in the draw dtype."""
+        raise NotImplementedError
+
+    def __check_init__(self):
+        if type(self.width) is not int or self.width < 1:
+            raise ValueError("basis width must be a positive integer")
+
+
+@final
+class FourFeatureDrawBasis(AbstractDrawBasis):
+    """Evaluate constant, identity, tanh, and shifted tanh features."""
+
+    width: int = eqx.field(static=True, init=False, default=4)
+
+    def __call__(self, value):
+        one = jnp.ones_like(value)
+        return jnp.stack(
+            (one, value, jnp.tanh(value), jnp.tanh(value + one) - jnp.tanh(one))
+        )
+
+
+@final
+class IdentityDrawBasis(AbstractDrawBasis):
+    """Use the raw draw value as the sole basis feature."""
+
+    width: int = eqx.field(static=True, init=False, default=1)
+
+    def __call__(self, value):
+        return value[None]
+
+
+class AbstractDrawPool(eqx.Module):
+    """Pool aligned coefficient and basis rows independently within each draw.
+
+    A common permutation of the two inputs' rows must preserve the score.
+    """
+
+    @abstractmethod
+    def __call__(self, coefficients: Array, basis_values: Array) -> Array:
+        """Pool two aligned [N, R] arrays into one score [R]."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def pool_block(self, coefficients: Array, basis_values: Array) -> Array:
+        """Pool [N, R] coefficients and [K, N, R] basis values into [K, R].
+
+        Each score must equal the corresponding single-draw score.
+        """
+        raise NotImplementedError
+
+
+@final
+class MeanDrawPool(AbstractDrawPool):
+    """Average the coefficient-weighted rows independently by basis channel."""
+
+    def __call__(self, coefficients, basis_values):
+        return (coefficients * basis_values).mean(axis=0)
+
+    def pool_block(self, coefficients, basis_values):
+        return (
+            jnp.einsum("knr,nr->kr", basis_values, coefficients) / coefficients.shape[0]
+        )
+
+
+class AbstractDrawPath(eqx.Module):
+    """Prepare draw-free coefficients and evaluate aligned joint draws."""
+
+    context_width: eqx.AbstractVar[int]
+    state_width: eqx.AbstractVar[int]
+
+    @abstractmethod
+    def prepare(self, features: Array) -> Array:
+        """Prepare a draw-free payload from [N, context_width] features."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def per_draw(self, prepared: Array, draw: Array) -> Array:
+        """Map one draw [N] to a contribution [N, state_width]."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def mean_per_draw(self, prepared: Array, draws: Array) -> Array:
+        """Return the mean of the contributions from a nonempty block [K, N]."""
+        raise NotImplementedError
+
+
+@final
+class BasisDrawPath(AbstractDrawPath):
+    """Combine learned context coefficients with configurable basis and pooling."""
+
+    coefficient_head: AbstractChannelMixer
+    basis: AbstractDrawBasis
+    pool: AbstractDrawPool
+    projection: eqx.nn.Linear
+
+    def __init__(
+        self,
+        coefficient_head: AbstractChannelMixer,
+        basis: AbstractDrawBasis,
+        pool: AbstractDrawPool,
+        state_width: int,
+        *,
+        key: Array,
+    ):
+        self.coefficient_head = coefficient_head
+        self.basis = basis
+        self.pool = pool
+        self.projection = eqx.nn.Linear(
+            basis.width, state_width, use_bias=False, key=key
+        )
+
+    @property
+    def context_width(self) -> int:
+        return self.coefficient_head.in_width
+
+    @property
+    def state_width(self) -> int:
+        return self.projection.out_features
+
+    def __check_init__(self):
+        if self.coefficient_head.out_width != self.basis.width:
+            raise ValueError("coefficient head output width must match the basis width")
+
+    def prepare(self, features):
+        return self.coefficient_head.apply(features)
+
+    def per_draw(self, prepared, draw):
+        basis_values = jax.vmap(self.basis)(draw)
+        scores = self.pool(prepared, basis_values)
+        return (draw[:, None] * scores) @ self.projection.weight.T
+
+    def mean_per_draw(self, prepared, draws):
+        basis_values = jax.vmap(jax.vmap(self.basis))(draws)
+        scores = self.pool.pool_block(prepared, basis_values)
+        # Pair each draw with its own score and project only after averaging.
+        moments = (draws.T @ scores) / draws.shape[0]
+        return moments @ self.projection.weight.T
+
+
+class MixerContext(NamedTuple):
+    """Block-local draw-free payload shared by both paths."""
+
+    features: Array
+    prepared: Array
+
+
+@final
+class MixerEquation(AbstractEquation):
+    """Compose deterministic state mixing with separable joint-draw mixing."""
+
+    state_path: AbstractStatePath
+    draw_path: AbstractDrawPath
+    history_capacity: int = eqx.field(static=True, init=False, default=1)
+
+    @property
+    def state_width(self) -> int:
+        return self.state_path.state_width
+
+    def __check_init__(self):
+        if self.draw_path.context_width != self.state_path.context_width:
+            raise ValueError("draw and state paths must have the same context width")
+        if self.draw_path.state_width != self.state_width:
+            raise ValueError("draw and state paths must have the same state width")
+
+    def encode(self, history, valid, observations):
+        features = self.state_path.encode(history, valid, observations)
+        return MixerContext(features, self.draw_path.prepare(features))
+
+    def deterministic(self, context):
+        return self.state_path.deterministic(context.features)
+
+    def per_draw(self, context, draw):
+        return self.draw_path.per_draw(context.prepared, draw)
+
+    def mean_per_draw(self, context, draws):
+        return self.draw_path.mean_per_draw(context.prepared, draws)
+
+
+def build_mixer_equation(
+    state_width: int,
+    width: int,
+    *,
+    state_depth: int = 1,
+    state_token_mixer: str = "mean",
+    heads: int = 4,
+    attention_backend: Literal["xla", "cudnn"] = "xla",
+    hidden_ratio: int = 2,
+    read: Callable[[Array], Array] = jnp.asarray,
+    basis: AbstractDrawBasis | None = None,
+    pool: AbstractDrawPool | None = None,
+    key: Array,
+) -> MixerEquation:
+    """Build a mixer equation with a four-feature basis and row mean by default."""
+    basis = FourFeatureDrawBasis() if basis is None else basis
+    pool = MeanDrawPool() if pool is None else pool
+    # Reuse the legacy state keys so paired runs start from the same state path.
+    coeff_key, _, projection_key, embedding_key, blocks_key, head_key = (
+        jax.random.split(key, 6)
+    )
+    state_path = MixerStatePath(
+        ElementwiseChannelMixer(state_width, read),
+        LinearChannelMixer(state_width + 1, width, key=embedding_key),
+        _make_mixer_blocks(
+            width,
+            state_depth,
+            state_token_mixer,
+            heads,
+            attention_backend,
+            hidden_ratio,
+            blocks_key,
+        ),
+        LinearChannelMixer(width, state_width, key=head_key),
+    )
+    draw_path = BasisDrawPath(
+        GatedChannelMixer(
+            width, hidden_ratio * width, out_width=basis.width, key=coeff_key
+        ),
+        basis,
+        pool,
+        state_width,
+        key=projection_key,
+    )
+    return MixerEquation(state_path, draw_path)
 
 
 # Integration ----------------------------------------------------------------
