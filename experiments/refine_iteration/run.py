@@ -43,7 +43,6 @@ from navi import (
 )
 from navi.fixed_point import (
     FixedPointUpdate,
-    LinearChannelMixer,
     RunningMeanIntegrator,
     advance_chunk,
     build_mixer_equation,
@@ -62,7 +61,7 @@ from navi.simulation_data import SimulationDataset
 logger = logging.getLogger(__name__)
 advance_stored_chunk = eqx.filter_jit(advance_chunk)
 STRUCTURED_CALIBRATION_EPISODES = 1024
-CHECKPOINT_VERSION = 4
+CHECKPOINT_VERSION = 5
 
 
 @eqx.filter_jit
@@ -470,7 +469,10 @@ def parse_args(argv=None):
     parser.add_argument("--draw-depth", type=int, default=1)
     parser.add_argument("--state-depth", type=int, default=1)
     parser.add_argument(
-        "--token-mixer", choices=("mean", "attention"), default="attention"
+        "--draw-token-mixer", choices=("mean", "attention"), default="mean"
+    )
+    parser.add_argument(
+        "--state-token-mixer", choices=("mean", "attention"), default="attention"
     )
     parser.add_argument("--query-depth", type=int, default=2)
     parser.add_argument(
@@ -632,11 +634,9 @@ def build_models(args, init, edges):
             heads=args.heads,
             draw_depth=args.draw_depth,
             state_depth=args.state_depth,
-            token_mixer=args.token_mixer,
+            draw_token_mixer=args.draw_token_mixer,
+            state_token_mixer=args.state_token_mixer,
             read=jnp.asarray,
-            draw_embedding=LinearChannelMixer(
-                args.width + 1, args.width, key=jax.random.split(update_key, 6)[0]
-            ),
             key=update_key,
             attention_backend=args.attention_backend,
         ),
@@ -718,6 +718,7 @@ def run(args):
         "checkpoint_version": CHECKPOINT_VERSION,
         "integrator": "running-mean",
         "state_read": "identity",
+        "draw_embedding": "gated",
         "hidden_ratio": 2,
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "pre_norm": True,

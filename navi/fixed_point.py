@@ -458,7 +458,8 @@ def build_mixer_equation(
     *,
     draw_depth: int = 1,
     state_depth: int = 1,
-    token_mixer: str = "mean",
+    draw_token_mixer: str = "mean",
+    state_token_mixer: str = "mean",
     heads: int = 4,
     attention_backend: Literal["xla", "cudnn"] = "xla",
     hidden_ratio: int = 2,
@@ -473,8 +474,9 @@ def build_mixer_equation(
         width: Token width of both paths.
         draw_depth: Number of mixer blocks on the draw path.
         state_depth: Number of mixer blocks on the draw-free path.
-        token_mixer: ``"mean"`` for mean pooling or ``"attention"``.
-        heads: Attention heads when ``token_mixer`` is ``"attention"``.
+        draw_token_mixer: ``"mean"`` or ``"attention"`` for per-draw blocks.
+        state_token_mixer: ``"mean"`` or ``"attention"`` for state encoder blocks.
+        heads: Number of heads for attention blocks.
         attention_backend: ``"xla"`` or ``"cudnn"`` for both attention paths.
         hidden_ratio: Hidden width of each gated mixer relative to ``width``.
         read: Elementwise read map applied to the iterate, identity by default.
@@ -483,18 +485,18 @@ def build_mixer_equation(
         key: PRNG key.
     """
 
-    def make_blocks(depth, key):
+    def make_blocks(depth, token_mixer, key):
+        if token_mixer not in ("mean", "attention"):
+            raise ValueError(f"unknown token mixer {token_mixer!r}")
         blocks = []
         for block_key in jax.random.split(key, depth):
             mix_key, channel_key = jax.random.split(block_key)
             if token_mixer == "mean":
                 mixer = MeanPoolTokenMixer(width, key=mix_key)
-            elif token_mixer == "attention":
+            else:
                 mixer = AttentionTokenMixer(
                     width, heads, backend=attention_backend, key=mix_key
                 )
-            else:
-                raise ValueError(f"unknown token mixer {token_mixer!r}")
             channel = GatedChannelMixer(width, hidden_ratio * width, key=channel_key)
             blocks.append(MixerBlock(mixer, channel))
         return tuple(blocks)
@@ -509,10 +511,10 @@ def build_mixer_equation(
     return MixerEquation(
         ElementwiseChannelMixer(state_width, read),
         draw_embedding,
-        make_blocks(draw_depth, keys[1]),
+        make_blocks(draw_depth, draw_token_mixer, keys[1]),
         LinearChannelMixer(width, state_width, key=keys[2]),
         LinearChannelMixer(state_width + 1, width, key=keys[3]),
-        make_blocks(state_depth, keys[4]),
+        make_blocks(state_depth, state_token_mixer, keys[4]),
         LinearChannelMixer(width, state_width, key=keys[5]),
     )
 
