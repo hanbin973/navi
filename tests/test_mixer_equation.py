@@ -8,12 +8,14 @@ import numpy as np
 import pytest
 
 from experiments.refine_iteration.replay_correlation import _checkpoint_args
-from experiments.refine_iteration.run import build_models, parse_args
+from experiments.refine_iteration.run import (
+    CHECKPOINT_VERSION,
+    build_models,
+    parse_args,
+)
 from navi.fixed_point import (
     AbstractDrawPool,
-    ConstantFreeDrawBasis,
     FixedPointUpdate,
-    FourFeatureDrawBasis,
     IdentityDrawBasis,
     RunningMeanIntegrator,
     advance_chunk,
@@ -87,9 +89,13 @@ def test_mixer_block_matches_explicit_draws_and_gradients(
 
 def test_identity_basis_mean_pool_retains_joint_draw_pairing():
     equation = build_mixer_equation(
-        2, 4, basis=IdentityDrawBasis(), key=jax.random.key(1)
+        2,
+        4,
+        basis=IdentityDrawBasis(),
+        row_basis=IdentityDrawBasis(),
+        key=jax.random.key(1),
     )
-    coefficients = jnp.array([[[1.0, 4.0]], [[3.0, -1.0]]], dtype=jnp.float32)
+    coefficients = jnp.array([[[[1.0, 4.0]]], [[[3.0, -1.0]]]], dtype=jnp.float32)
     draws = jnp.array(
         [[2.0, 4.0], [-2.0, -4.0], [2.0, -2.0], [-2.0, 2.0]],
         dtype=jnp.float32,
@@ -100,6 +106,21 @@ def test_identity_basis_mean_pool_retains_joint_draw_pairing():
     np.testing.assert_allclose(
         equation.draw_path.mean_per_draw(coefficients, draws), expected, atol=2e-6
     )
+
+
+def test_default_draw_path_matches_basis_pair_sum():
+    equation = build_mixer_equation(2, 4, key=jax.random.key(1))
+    draws = jnp.array([[0.2, -0.9, 1.4], [-1.6, 0.4, 0.7]])
+    coefficients = jnp.arange(24, dtype=draws.dtype).reshape(3, 2, 2, 2) / 7
+    features = jnp.stack((draws, jnp.tanh(draws)), axis=-1)
+    terms = (
+        features[:, None, :, :, None, None]
+        * features[:, :, None, None, :, None]
+        * coefficients[None, None, ...]
+    )
+    expected = terms.mean(axis=2).sum(axis=(2, 3)).mean(axis=0)
+    actual = eqx.filter_jit(equation.draw_path.mean_per_draw)(coefficients, draws)
+    np.testing.assert_allclose(actual, expected, atol=2e-6)
 
 
 def test_mixer_rollout_can_resume_under_jit_vmap_and_grad():
@@ -136,13 +157,16 @@ def test_mixer_rollout_can_resume_under_jit_vmap_and_grad():
         np.testing.assert_allclose(lhs, rhs, rtol=2e-5, atol=2e-6)
 
 
-def test_constant_free_basis_preserves_nonconstant_features():
+def test_default_basis_evaluates_identity_and_tanh():
     draws = jnp.array([-1.0, 0.0, 0.5], dtype=jnp.float32)
-    features = jax.jit(jax.vmap(ConstantFreeDrawBasis()))(draws)
-    np.testing.assert_array_equal(
-        features, jax.vmap(FourFeatureDrawBasis())(draws)[:, 1:]
+    equation = build_mixer_equation(2, 4, key=jax.random.key(0))
+    basis = equation.draw_path.basis
+    features = jax.jit(jax.vmap(basis))(draws)
+    assert basis.width == 2
+    assert features.dtype == draws.dtype
+    np.testing.assert_allclose(
+        features, jnp.stack((draws, jnp.tanh(draws)), axis=-1), atol=1e-7
     )
-    np.testing.assert_array_equal(features[1], jnp.zeros(3, dtype=draws.dtype))
 
 
 @pytest.mark.parametrize(
@@ -159,9 +183,11 @@ def test_mixer_checkpoint_roundtrip(tmp_path, flags):
             *flags,
         ]
     )
+    if not flags:
+        assert args.draw_basis == "identity-tanh"
     metadata = vars(args) | {
         "output_dir": str(args.output_dir),
-        "checkpoint_version": 7,
+        "checkpoint_version": CHECKPOINT_VERSION,
         "draw_pool": "mean",
     }
     (tmp_path / "run.json").write_text(json.dumps(metadata))
@@ -187,7 +213,7 @@ def test_mixer_checkpoint_roundtrip(tmp_path, flags):
         atol=1e-6,
     )
 
-    metadata["checkpoint_version"] = 6
+    metadata["checkpoint_version"] = CHECKPOINT_VERSION - 1
     (tmp_path / "run.json").write_text(json.dumps(metadata))
     with pytest.raises(ValueError, match="unsupported.*checkpoint layout"):
         _checkpoint_args(tmp_path)

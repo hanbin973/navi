@@ -450,19 +450,14 @@ class AbstractDrawBasis(eqx.Module):
             raise ValueError("basis width must be a positive integer")
 
 
-def _nonconstant_draw_features(value: Array, one: Array) -> tuple[Array, Array, Array]:
-    return value, jnp.tanh(value), jnp.tanh(value + one) - jnp.tanh(one)
-
-
 @final
-class FourFeatureDrawBasis(AbstractDrawBasis):
-    """Evaluate constant, identity, tanh, and shifted tanh features."""
+class IdentityTanhDrawBasis(AbstractDrawBasis):
+    """Evaluate identity and tanh features."""
 
-    width: int = eqx.field(static=True, init=False, default=4)
+    width: int = eqx.field(static=True, init=False, default=2)
 
     def __call__(self, value):
-        one = jnp.ones_like(value)
-        return jnp.stack((one, *_nonconstant_draw_features(value, one)))
+        return jnp.stack((value, jnp.tanh(value)))
 
 
 @final
@@ -472,7 +467,10 @@ class ConstantFreeDrawBasis(AbstractDrawBasis):
     width: int = eqx.field(static=True, init=False, default=3)
 
     def __call__(self, value):
-        return jnp.stack(_nonconstant_draw_features(value, jnp.ones_like(value)))
+        one = jnp.ones_like(value)
+        return jnp.stack(
+            (value, jnp.tanh(value), jnp.tanh(value + one) - jnp.tanh(one))
+        )
 
 
 @final
@@ -547,6 +545,7 @@ class BasisDrawPath(AbstractDrawPath):
 
     coefficient_head: AbstractChannelMixer
     basis: AbstractDrawBasis
+    row_basis: AbstractDrawBasis
     pool: AbstractDrawPool
     state_width: int = eqx.field(static=True)
 
@@ -557,26 +556,33 @@ class BasisDrawPath(AbstractDrawPath):
     def __check_init__(self):
         if type(self.state_width) is not int or self.state_width < 1:
             raise ValueError("state width must be a positive integer")
-        if self.coefficient_head.out_width != self.basis.width * self.state_width:
+        expected_width = self.basis.width * self.row_basis.width * self.state_width
+        if self.coefficient_head.out_width != expected_width:
             raise ValueError(
-                "coefficient head output width must be basis width times state width"
+                "coefficient head output width must match both bases and state width"
             )
 
     def prepare(self, features):
         return self.coefficient_head.apply(features).reshape(
-            features.shape[0], self.basis.width, self.state_width
+            features.shape[0], self.basis.width, self.row_basis.width, self.state_width
         )
 
     def per_draw(self, prepared, draw):
         basis_values = jax.vmap(self.basis)(draw)
-        scores = self.pool(prepared, basis_values).sum(axis=0)
-        return draw[:, None] * scores
+        row_values = jax.vmap(self.row_basis)(draw)
+        pooled = jax.vmap(self.pool, in_axes=(2, None), out_axes=1)(
+            prepared, basis_values
+        )
+        return row_values @ pooled.sum(axis=0)
 
     def mean_per_draw(self, prepared, draws):
         basis_values = jax.vmap(jax.vmap(self.basis))(draws)
-        scores = self.pool.pool_block(prepared, basis_values).sum(axis=1)
-        # Contract each joint draw with its score without stacking [N, D] terms.
-        return (draws.T @ scores) / draws.shape[0]
+        row_values = jax.vmap(jax.vmap(self.row_basis))(draws)
+        pooled = jax.vmap(self.pool.pool_block, in_axes=(2, None), out_axes=2)(
+            prepared, basis_values
+        )
+        scores = pooled.sum(axis=1)
+        return jnp.einsum("kns,ksd->nd", row_values, scores) / draws.shape[0]
 
 
 class MixerContext(NamedTuple):
@@ -629,11 +635,13 @@ def build_mixer_equation(
     hidden_ratio: int = 2,
     read: Callable[[Array], Array] = jnp.asarray,
     basis: AbstractDrawBasis | None = None,
+    row_basis: AbstractDrawBasis | None = None,
     pool: AbstractDrawPool | None = None,
     key: Array,
 ) -> MixerEquation:
-    """Build a mixer equation with a four-feature basis and row mean by default."""
-    basis = FourFeatureDrawBasis() if basis is None else basis
+    """Build a mixer equation with identity and tanh on both sides by default."""
+    basis = IdentityTanhDrawBasis() if basis is None else basis
+    row_basis = IdentityTanhDrawBasis() if row_basis is None else row_basis
     pool = MeanDrawPool() if pool is None else pool
     # Preserve the state initialization used for paired benchmarks.
     coeff_key, _, _, embedding_key, blocks_key, head_key = jax.random.split(key, 6)
@@ -655,10 +663,11 @@ def build_mixer_equation(
         GatedChannelMixer(
             width,
             hidden_ratio * width,
-            out_width=basis.width * state_width,
+            out_width=basis.width * row_basis.width * state_width,
             key=coeff_key,
         ),
         basis,
+        row_basis,
         pool,
         state_width,
     )

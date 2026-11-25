@@ -44,8 +44,8 @@ from navi import (
 from navi.fixed_point import (
     ConstantFreeDrawBasis,
     FixedPointUpdate,
-    FourFeatureDrawBasis,
     IdentityDrawBasis,
+    IdentityTanhDrawBasis,
     RunningMeanIntegrator,
     advance_chunk,
     build_mixer_equation,
@@ -64,9 +64,9 @@ from navi.simulation_data import SimulationDataset
 logger = logging.getLogger(__name__)
 advance_stored_chunk = eqx.filter_jit(advance_chunk)
 STRUCTURED_CALIBRATION_EPISODES = 1024
-CHECKPOINT_VERSION = 7
+CHECKPOINT_VERSION = 8
 DRAW_BASES = {
-    "four-feature": FourFeatureDrawBasis,
+    "identity-tanh": IdentityTanhDrawBasis,
     "no-constant": ConstantFreeDrawBasis,
     "identity": IdentityDrawBasis,
 }
@@ -475,7 +475,7 @@ def parse_args(argv=None):
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument(
-        "--draw-basis", choices=tuple(DRAW_BASES), default="four-feature"
+        "--draw-basis", choices=tuple(DRAW_BASES), default="identity-tanh"
     )
     parser.add_argument("--state-depth", type=int, default=1)
     parser.add_argument(
