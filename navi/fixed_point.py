@@ -10,8 +10,9 @@ An ``AbstractIntegrator`` steps the iterate toward that estimate with a
 scheduled gain, and ``FixedPointUpdate`` owns the carry.
 
 ``MixerEquation`` builds both terms from transformer-style parts. Each context
-row is a token. Within one draw, every token fuses that row's draw value, read
-state, and observation before any mixing. ``MixerBlock`` then alternates an
+row is a token. The state path encodes the read state and observations once.
+Within one draw, every token fuses that row's draw value and encoded state
+before draw-specific mixing. ``MixerBlock`` alternates an
 ``AbstractTokenMixer``, the only part that combines rows, with an
 ``AbstractChannelMixer``, which acts on one token at a time. Draws never mix:
 each draw is processed alone, and the only operation across draws is the
@@ -154,13 +155,15 @@ class GatedChannelMixer(AbstractChannelMixer):
     value: eqx.nn.Linear
     output: eqx.nn.Linear
 
-    def __init__(self, width: int, hidden: int, *, key: Array):
+    def __init__(
+        self, width: int, hidden: int, *, out_width: int | None = None, key: Array
+    ):
         gate_key, value_key, output_key = jax.random.split(key, 3)
         self.in_width = width
-        self.out_width = width
+        self.out_width = width if out_width is None else out_width
         self.gate = eqx.nn.Linear(width, hidden, key=gate_key)
         self.value = eqx.nn.Linear(width, hidden, key=value_key)
-        self.output = eqx.nn.Linear(hidden, width, key=output_key)
+        self.output = eqx.nn.Linear(hidden, self.out_width, key=output_key)
 
     def __call__(self, token):
         return self.output(jax.nn.silu(self.gate(token)) * self.value(token))
@@ -349,11 +352,11 @@ class AbstractEquation(eqx.Module):
                 )
 
 
-def _run_tower(embedding, blocks, head, features):
+def _encode_tokens(embedding, blocks, features):
     tokens = embedding.apply(features)
     for block in blocks:
         tokens = block(tokens)
-    return head.apply(tokens)
+    return tokens
 
 
 @final
@@ -363,15 +366,14 @@ class MixerEquation(AbstractEquation):
     The equation reads only the latest iterate. Per row i, with read state
     r_i = read(a_i) and observation y_i:
 
-    - draw path: token [xi_i, r_i, y_i] -> draw_blocks -> draw_head;
-    - draw-free path: token [r_i, y_i] -> state_blocks -> state_head.
-
-    The draw value, read state, and observation are fused in the embedding,
-    before any token mixer runs.
+    - encode: [r_i, y_i] -> state_embedding -> state_blocks -> context_i
+    - deterministic: context_i -> state_head
+    - per draw: [xi_i, context_i] -> draw_embedding -> draw_blocks -> draw_head
 
     Args:
         read: Channel mixer from D to D applied to the iterate, such as tanh.
-        draw_embedding: Channel mixer from D + 2 to the draw-path width.
+        draw_embedding: Channel mixer from the encoded state width plus one
+            draw value to the draw-path width.
         draw_blocks: Mixer blocks of the draw-path width. May be empty.
         draw_head: Channel mixer from the draw-path width to D.
         state_embedding: Channel mixer from D + 1 to the draw-free width.
@@ -413,12 +415,24 @@ class MixerEquation(AbstractEquation):
         width = self.state_width
         if self.read.in_width != width:
             raise ValueError("read must map the state width to itself")
-        for name, embedding, blocks, head, fields in (
-            ("draw", self.draw_embedding, self.draw_blocks, self.draw_head, 2),
-            ("state", self.state_embedding, self.state_blocks, self.state_head, 1),
+        for name, embedding, blocks, head, input_width in (
+            (
+                "state",
+                self.state_embedding,
+                self.state_blocks,
+                self.state_head,
+                width + 1,
+            ),
+            (
+                "draw",
+                self.draw_embedding,
+                self.draw_blocks,
+                self.draw_head,
+                self.state_embedding.out_width + 1,
+            ),
         ):
-            if embedding.in_width != width + fields:
-                raise ValueError(f"{name} embedding must take {width + fields} inputs")
+            if embedding.in_width != input_width:
+                raise ValueError(f"{name} embedding must take {input_width} inputs")
             if any(block.width != embedding.out_width for block in blocks):
                 raise ValueError(f"{name} blocks must match the embedding width")
             if head.in_width != embedding.out_width or head.out_width != width:
@@ -426,18 +440,16 @@ class MixerEquation(AbstractEquation):
 
     def encode(self, history, valid, observations):
         latest = jnp.where(valid[-1], history[-1], 0)
-        return jnp.concatenate((self.read.apply(latest), observations), axis=-1)
+        features = jnp.concatenate((self.read.apply(latest), observations), axis=-1)
+        return _encode_tokens(self.state_embedding, self.state_blocks, features)
 
     def deterministic(self, context):
-        return _run_tower(
-            self.state_embedding, self.state_blocks, self.state_head, context
-        )
+        return self.state_head.apply(context)
 
     def per_draw(self, context, draw):
         features = jnp.concatenate((draw[:, None], context), axis=-1)
-        return _run_tower(
-            self.draw_embedding, self.draw_blocks, self.draw_head, features
-        )
+        tokens = _encode_tokens(self.draw_embedding, self.draw_blocks, features)
+        return self.draw_head.apply(tokens)
 
 
 def build_mixer_equation(
@@ -450,7 +462,8 @@ def build_mixer_equation(
     heads: int = 4,
     attention_backend: Literal["xla", "cudnn"] = "xla",
     hidden_ratio: int = 2,
-    read: Callable[[Array], Array] = jnp.tanh,
+    read: Callable[[Array], Array] = jnp.asarray,
+    draw_embedding: AbstractChannelMixer | None = None,
     key: Array,
 ) -> MixerEquation:
     """Build a ``MixerEquation`` with gated channel mixers.
@@ -464,7 +477,9 @@ def build_mixer_equation(
         heads: Attention heads when ``token_mixer`` is ``"attention"``.
         attention_backend: ``"xla"`` or ``"cudnn"`` for both attention paths.
         hidden_ratio: Hidden width of each gated mixer relative to ``width``.
-        read: Elementwise read map applied to the iterate.
+        read: Elementwise read map applied to the iterate, identity by default.
+        draw_embedding: Optional mixer from ``width + 1`` to ``width``.
+            Defaults to a gated mixer with hidden width ``hidden_ratio * width``.
         key: PRNG key.
     """
 
@@ -485,9 +500,15 @@ def build_mixer_equation(
         return tuple(blocks)
 
     keys = jax.random.split(key, 6)
+    if draw_embedding is None:
+        draw_embedding = GatedChannelMixer(
+            width + 1, hidden_ratio * width, out_width=width, key=keys[0]
+        )
+    if draw_embedding.out_width != width:
+        raise ValueError("draw embedding output width must match width")
     return MixerEquation(
         ElementwiseChannelMixer(state_width, read),
-        LinearChannelMixer(state_width + 2, width, key=keys[0]),
+        draw_embedding,
         make_blocks(draw_depth, keys[1]),
         LinearChannelMixer(width, state_width, key=keys[2]),
         LinearChannelMixer(state_width + 1, width, key=keys[3]),

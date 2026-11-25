@@ -43,6 +43,7 @@ from navi import (
 )
 from navi.fixed_point import (
     FixedPointUpdate,
+    LinearChannelMixer,
     RunningMeanIntegrator,
     advance_chunk,
     build_mixer_equation,
@@ -61,7 +62,7 @@ from navi.simulation_data import SimulationDataset
 logger = logging.getLogger(__name__)
 advance_stored_chunk = eqx.filter_jit(advance_chunk)
 STRUCTURED_CALIBRATION_EPISODES = 1024
-CHECKPOINT_VERSION = 3
+CHECKPOINT_VERSION = 4
 
 
 @eqx.filter_jit
@@ -633,6 +634,9 @@ def build_models(args, init, edges):
             state_depth=args.state_depth,
             token_mixer=args.token_mixer,
             read=jnp.asarray,
+            draw_embedding=LinearChannelMixer(
+                args.width + 1, args.width, key=jax.random.split(update_key, 6)[0]
+            ),
             key=update_key,
             attention_backend=args.attention_backend,
         ),
