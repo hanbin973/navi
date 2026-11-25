@@ -41,6 +41,7 @@ from navi import (
     NoContextEncoder,
     rollout_loss,
 )
+from navi.averaging import AveragedUpdate, UniformAverager
 from navi.fixed_point import (
     AxialAttentionEquation,
     FixedPointUpdate,
@@ -65,6 +66,7 @@ STRUCTURED_CALIBRATION_EPISODES = 1024
 INTEGRATORS = {
     "running-mean": RunningMeanIntegrator,
     "polynomial": PolynomialGainIntegrator,
+    "averaging": PolynomialGainIntegrator,
 }
 
 
@@ -470,7 +472,10 @@ def parse_args(argv=None):
         "--integrator",
         choices=tuple(INTEGRATORS),
         default="running-mean",
-        help="gain schedule for the fixed-point update (default: running-mean)",
+        help=(
+            "fixed-point update rule (default: running-mean); "
+            "averaging uses polynomial updates with uniform Polyak–Ruppert averaging"
+        ),
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--state-width", type=int, default=16)
@@ -638,6 +643,8 @@ def build_models(args, init, edges):
         ),
         INTEGRATORS[args.integrator](),
     )
+    if args.integrator == "averaging":
+        update = AveragedUpdate(update, UniformAverager())
     if args.readout == "no-context-last-context":
         encoder = NoContextEncoder(args.state_width)
         decoder = LastContextQueryDecoder(

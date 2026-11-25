@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from navi import AxialAttentionProposal, BarPredictor
+from navi.averaging import AveragedUpdate, LinearAverager, UniformAverager
 from navi.fixed_point import (
     AxialAttentionEquation,
     FixedPointUpdate,
@@ -90,3 +91,47 @@ def test_polynomial_gain_uses_one_for_first_block_and_draw_count_afterward():
     schedule = PolynomialGainIntegrator(exponent=0.75, scale=0.5)
     assert schedule.gain(jnp.int32(2), 2) == 1
     np.testing.assert_allclose(schedule.gain(jnp.int32(5), 3), 1.5 * 5**-0.75)
+
+
+@pytest.mark.parametrize(
+    ("averager", "weights"),
+    [(UniformAverager(), [1, 1, 1]), (LinearAverager(), [1, 2, 3])],
+)
+def test_averaged_update_preserves_fast_rollout(tmp_path, averager, weights):
+    equation, _ = _models()
+    update = FixedPointUpdate(equation, PolynomialGainIntegrator())
+    wrapped = AveragedUpdate(update, averager)
+    checkpoint = tmp_path / "update.eqx"
+    eqx.tree_serialise_leaves(checkpoint, update)
+    wrapped = eqx.tree_deserialise_leaves(checkpoint, wrapped)
+
+    observations = jnp.array([[0.3], [-0.2], [0.8]])
+    draws = jax.random.normal(jax.random.key(15), (3, 2, 3), dtype=jnp.float32)
+    initial = wrapped.initial_state(3)
+    carry = update.initial_state(3)
+    latest = []
+    for block in draws:
+        carry, _ = update.step(carry, block, observations)
+        latest.append(carry.history[-1])
+
+    scan = eqx.filter_jit(advance_chunk)
+    whole = scan(wrapped, initial, draws, observations)
+    first, drift = wrapped.step(initial, draws[0], observations)
+    np.testing.assert_allclose(first.average, latest[0], atol=2e-6)
+    np.testing.assert_allclose(
+        drift, update.drift(initial.solution, draws[0], observations)
+    )
+    resumed = scan(wrapped, first, draws[1:], observations)
+    np.testing.assert_allclose(whole.solution.history, carry.history, atol=2e-6)
+    np.testing.assert_allclose(resumed.average, whole.average, atol=2e-6)
+    snapshot = wrapped.snapshot(whole, observations)
+    np.testing.assert_allclose(
+        snapshot.embeddings, np.average(latest, axis=0, weights=weights), atol=2e-6
+    )
+    assert whole.step == 3
+    assert snapshot.draw_count == whole.draw_count == 6
+    np.testing.assert_allclose(
+        wrapped.drift(whole, draws[0], observations),
+        update.drift(carry, draws[0], observations),
+        atol=2e-6,
+    )

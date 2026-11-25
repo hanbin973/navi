@@ -417,18 +417,18 @@ class FixedPointUpdate(eqx.Module):
         return SolutionCarry(history, valid, carry.step + 1, draw_count), drift
 
 
-def advance_chunk(update, carry: SolutionCarry, draws: Array, observations: Array):
+def advance_chunk(update, carry, draws: Array, observations: Array):
     """Advance the updater through a chunk of draws.
 
     Args:
-        update: ``FixedPointUpdate`` that commits one iterate per step.
+        update: Fixed-point updater or wrapper that commits one iterate per step.
         carry: Initial or previously advanced carry for the same context rows.
         draws: T steps over N context rows, shaped [T, N] for single draws or
             [T, K, N] for blocks of K joint draws.
         observations: Context observations [N, 1] aligned with the draws.
 
     Returns:
-        Final ``SolutionCarry``. The step count advances by T and the draw
+        Final carry of the same type. The step count advances by T and the draw
         count by T * K, with K = 1 for single draws.
     """
 

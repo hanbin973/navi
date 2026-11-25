@@ -33,6 +33,8 @@ changing them.
   pooling, proposal and integrator interfaces, and recurrent rollouts.
 - `navi/fixed_point.py` — per-draw axial equations, stochastic-approximation
   integrators, resumable rollouts, and the shared context snapshot.
+- `navi/averaging.py` — uniform and linearly weighted Polyak–Ruppert
+  averaging for fixed-point snapshots.
 - `navi/predictor.py` — context encoder and query decoder interfaces, readout
   components, and their composition into the bar predictor.
 - `navi/training.py` — draw-prefix selection and the training objective that composes updater and predictor.
@@ -60,7 +62,8 @@ changing them.
 - `experiments/fixed_point/` — fixed-point training, prefix evaluation,
   dataset generation, and structured checkpoint replay. Run
   `python -m experiments.fixed_point.run` with `--integrator running-mean`
-  (the default) or `--integrator polynomial`.
+  (the default), `--integrator polynomial`, or `--integrator averaging`
+  for polynomial updates with uniform iterate averaging.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
   and held-out extrapolation evaluation. Replay from the original commit.
 - `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322
