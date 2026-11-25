@@ -450,6 +450,10 @@ class AbstractDrawBasis(eqx.Module):
             raise ValueError("basis width must be a positive integer")
 
 
+def _nonconstant_draw_features(value: Array, one: Array) -> tuple[Array, Array, Array]:
+    return value, jnp.tanh(value), jnp.tanh(value + one) - jnp.tanh(one)
+
+
 @final
 class FourFeatureDrawBasis(AbstractDrawBasis):
     """Evaluate constant, identity, tanh, and shifted tanh features."""
@@ -458,9 +462,17 @@ class FourFeatureDrawBasis(AbstractDrawBasis):
 
     def __call__(self, value):
         one = jnp.ones_like(value)
-        return jnp.stack(
-            (one, value, jnp.tanh(value), jnp.tanh(value + one) - jnp.tanh(one))
-        )
+        return jnp.stack((one, *_nonconstant_draw_features(value, one)))
+
+
+@final
+class ConstantFreeDrawBasis(AbstractDrawBasis):
+    """Evaluate identity, tanh, and shifted tanh features."""
+
+    width: int = eqx.field(static=True, init=False, default=3)
+
+    def __call__(self, value):
+        return jnp.stack(_nonconstant_draw_features(value, jnp.ones_like(value)))
 
 
 @final

@@ -42,6 +42,7 @@ from navi import (
     rollout_loss,
 )
 from navi.fixed_point import (
+    ConstantFreeDrawBasis,
     FixedPointUpdate,
     FourFeatureDrawBasis,
     IdentityDrawBasis,
@@ -64,7 +65,11 @@ logger = logging.getLogger(__name__)
 advance_stored_chunk = eqx.filter_jit(advance_chunk)
 STRUCTURED_CALIBRATION_EPISODES = 1024
 CHECKPOINT_VERSION = 7
-DRAW_BASES = {"four-feature": FourFeatureDrawBasis, "identity": IdentityDrawBasis}
+DRAW_BASES = {
+    "four-feature": FourFeatureDrawBasis,
+    "no-constant": ConstantFreeDrawBasis,
+    "identity": IdentityDrawBasis,
+}
 
 
 @eqx.filter_jit

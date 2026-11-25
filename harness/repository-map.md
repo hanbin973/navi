@@ -68,7 +68,8 @@ changing them.
 - `experiments/refine_iteration/` — mixer-equation training, prefix evaluation,
   dataset generation, and structured checkpoint replay using identity state
   read and running-mean integration. New runs default to a four-feature draw
-  basis and row-mean pooling. Use `--draw-basis identity` for a single feature.
+  basis and row-mean pooling. Use `--draw-basis no-constant` to drop the
+  constant feature or `--draw-basis identity` for a single feature.
   Select the state mixer and depth with `--state-token-mixer` and
   `--state-depth`. Structured replay supports version-7 checkpoints.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,

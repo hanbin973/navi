@@ -11,7 +11,9 @@ from experiments.refine_iteration.replay_correlation import _checkpoint_args
 from experiments.refine_iteration.run import build_models, parse_args
 from navi.fixed_point import (
     AbstractDrawPool,
+    ConstantFreeDrawBasis,
     FixedPointUpdate,
+    FourFeatureDrawBasis,
     IdentityDrawBasis,
     RunningMeanIntegrator,
     advance_chunk,
@@ -134,7 +136,18 @@ def test_mixer_rollout_can_resume_under_jit_vmap_and_grad():
         np.testing.assert_allclose(lhs, rhs, rtol=2e-5, atol=2e-6)
 
 
-@pytest.mark.parametrize("flags", [[], ["--draw-basis", "identity"]])
+def test_constant_free_basis_preserves_nonconstant_features():
+    draws = jnp.array([-1.0, 0.0, 0.5], dtype=jnp.float32)
+    features = jax.jit(jax.vmap(ConstantFreeDrawBasis()))(draws)
+    np.testing.assert_array_equal(
+        features, jax.vmap(FourFeatureDrawBasis())(draws)[:, 1:]
+    )
+    np.testing.assert_array_equal(features[1], jnp.zeros(3, dtype=draws.dtype))
+
+
+@pytest.mark.parametrize(
+    "flags", [[], ["--draw-basis", "identity"], ["--draw-basis", "no-constant"]]
+)
 def test_mixer_checkpoint_roundtrip(tmp_path, flags):
     args = parse_args(
         [
