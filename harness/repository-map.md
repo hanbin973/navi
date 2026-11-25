@@ -64,6 +64,10 @@ changing them.
   `python -m experiments.fixed_point.run` with `--integrator running-mean`
   (the default), `--integrator polynomial`, or `--integrator averaging`
   for polynomial updates with uniform iterate averaging.
+- `experiments/refine_iteration/` — mixer-equation training, prefix evaluation,
+  dataset generation, and structured checkpoint replay using identity state
+  read and running-mean integration. Select the mixer and path depths with
+  `--token-mixer`, `--draw-depth`, and `--state-depth`.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
   and held-out extrapolation evaluation. Replay from the original commit.
 - `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322

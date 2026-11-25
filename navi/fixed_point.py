@@ -21,14 +21,14 @@ learned weights or hyperparameters, not wiring.
 
 from abc import abstractmethod
 from collections.abc import Callable
-from typing import Any, NamedTuple, final
+from typing import Any, Literal, NamedTuple, final
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax import Array
 
-from .blocks import _features
+from .blocks import _cudnn_attention, _features
 
 EquationContext = Any
 """PyTree returned by ``AbstractEquation.encode`` and consumed by its terms."""
@@ -204,19 +204,53 @@ class MeanPoolTokenMixer(AbstractTokenMixer):
 
 @final
 class AttentionTokenMixer(AbstractTokenMixer):
-    """Apply multi-head softmax self-attention over the rows."""
+    """Apply multi-head softmax self-attention over the rows.
+
+    The default backend is ``"xla"``. ``"cudnn"`` uses bfloat16 attention
+    on a compatible CUDA GPU, with head dimensions supported by cuDNN.
+    """
 
     width: int = eqx.field(static=True)
-    attention: eqx.nn.MultiheadAttention
+    heads: int = eqx.field(static=True)
+    backend: Literal["xla", "cudnn"] = eqx.field(static=True)
+    query_proj: eqx.nn.Linear
+    key_proj: eqx.nn.Linear
+    value_proj: eqx.nn.Linear
+    output_proj: eqx.nn.Linear
 
-    def __init__(self, width: int, heads: int, *, key: Array):
+    def __init__(
+        self,
+        width: int,
+        heads: int,
+        *,
+        backend: Literal["xla", "cudnn"] = "xla",
+        key: Array,
+    ):
+        if type(heads) is not int or heads < 1:
+            raise ValueError("heads must be a positive integer")
         if width % heads:
             raise ValueError("width must be divisible by heads")
+        if backend not in ("xla", "cudnn"):
+            raise ValueError("attention backend must be xla or cudnn")
         self.width = width
-        self.attention = eqx.nn.MultiheadAttention(heads, width, key=key)
+        self.heads = heads
+        self.backend = backend
+        q_key, k_key, v_key, out_key = jax.random.split(key, 4)
+        self.query_proj = eqx.nn.Linear(width, width, use_bias=False, key=q_key)
+        self.key_proj = eqx.nn.Linear(width, width, use_bias=False, key=k_key)
+        self.value_proj = eqx.nn.Linear(width, width, use_bias=False, key=v_key)
+        self.output_proj = eqx.nn.Linear(width, width, use_bias=False, key=out_key)
 
     def __call__(self, tokens):
-        return self.attention(tokens, tokens, tokens)
+        shape = (tokens.shape[0], self.heads, self.width // self.heads)
+        q = jax.vmap(self.query_proj)(tokens).reshape(shape)
+        k = jax.vmap(self.key_proj)(tokens).reshape(shape)
+        v = jax.vmap(self.value_proj)(tokens).reshape(shape)
+        if self.backend == "cudnn":
+            attended = _cudnn_attention(q[None], k[None], v[None], None, None)[0]
+        else:
+            attended = jax.nn.dot_product_attention(q, k, v, implementation="xla")
+        return jax.vmap(self.output_proj)(attended.reshape(tokens.shape))
 
 
 @final
@@ -414,6 +448,7 @@ def build_mixer_equation(
     state_depth: int = 1,
     token_mixer: str = "mean",
     heads: int = 4,
+    attention_backend: Literal["xla", "cudnn"] = "xla",
     hidden_ratio: int = 2,
     read: Callable[[Array], Array] = jnp.tanh,
     key: Array,
@@ -427,6 +462,7 @@ def build_mixer_equation(
         state_depth: Number of mixer blocks on the draw-free path.
         token_mixer: ``"mean"`` for mean pooling or ``"attention"``.
         heads: Attention heads when ``token_mixer`` is ``"attention"``.
+        attention_backend: ``"xla"`` or ``"cudnn"`` for both attention paths.
         hidden_ratio: Hidden width of each gated mixer relative to ``width``.
         read: Elementwise read map applied to the iterate.
         key: PRNG key.
@@ -439,7 +475,9 @@ def build_mixer_equation(
             if token_mixer == "mean":
                 mixer = MeanPoolTokenMixer(width, key=mix_key)
             elif token_mixer == "attention":
-                mixer = AttentionTokenMixer(width, heads, key=mix_key)
+                mixer = AttentionTokenMixer(
+                    width, heads, backend=attention_backend, key=mix_key
+                )
             else:
                 raise ValueError(f"unknown token mixer {token_mixer!r}")
             channel = GatedChannelMixer(width, hidden_ratio * width, key=channel_key)
