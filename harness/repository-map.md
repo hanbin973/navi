@@ -31,9 +31,9 @@ changing them.
 
 - `navi/bayes_update.py` — axial proposal, prefix-conditioned Deep Sets draw
   pooling, proposal and integrator interfaces, and recurrent rollouts.
-- `navi/fixed_point.py` — deterministic state mixing and separable draw
-  equations with configurable basis and row pooling, the legacy mixer equation,
-  stochastic-approximation integrators, and resumable rollouts.
+- `navi/fixed_point.py` — deterministic state mixing and a separable draw
+  equation with per-state-channel coefficients, configurable basis and row
+  pooling, stochastic-approximation integrators, and resumable rollouts.
 - `navi/averaging.py` — uniform and linearly weighted Polyak–Ruppert
   averaging for fixed-point snapshots.
 - `navi/predictor.py` — context encoder and query decoder interfaces, readout
@@ -68,10 +68,9 @@ changing them.
 - `experiments/refine_iteration/` — mixer-equation training, prefix evaluation,
   dataset generation, and structured checkpoint replay using identity state
   read and running-mean integration. New runs default to a four-feature draw
-  basis and row-mean pooling. Use `--draw-basis identity` for a single feature,
-  or `--draw-architecture legacy` for the version-5 draw path and its
-  `--draw-token-mixer` and `--draw-depth` options. Both paths support
-  `--state-token-mixer` and `--state-depth`.
+  basis and row-mean pooling. Use `--draw-basis identity` for a single feature.
+  Select the state mixer and depth with `--state-token-mixer` and
+  `--state-depth`. Structured replay supports version-7 checkpoints.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
   and held-out extrapolation evaluation. Replay from the original commit.
 - `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322

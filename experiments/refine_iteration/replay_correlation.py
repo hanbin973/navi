@@ -21,7 +21,6 @@ from experiments.refine_iteration.correlation import (
 from experiments.refine_iteration.run import (
     CHECKPOINT_VERSION,
     DRAW_BASES,
-    LEGACY_CHECKPOINT_VERSION,
     build_models,
     evaluate,
     sample_structured_episode,
@@ -93,21 +92,15 @@ def _checkpoint_args(run):
             f"{run} requires an online structured refine-iteration checkpoint"
         )
     version = getattr(args, "checkpoint_version", None)
-    architecture = getattr(args, "draw_architecture", None)
-    if version == LEGACY_CHECKPOINT_VERSION and architecture in (
-        None,
-        "legacy",
-    ):
-        args.draw_architecture = "legacy"
-    elif not (
-        version == CHECKPOINT_VERSION
-        and architecture == "basis"
-        and getattr(args, "draw_basis", None) in tuple(DRAW_BASES)
-        and getattr(args, "draw_pool", None) == "mean"
+    if (
+        version != CHECKPOINT_VERSION
+        or getattr(args, "draw_basis", None) not in tuple(DRAW_BASES)
+        or getattr(args, "draw_pool", None) != "mean"
     ):
         raise ValueError(
             f"{run} has an unsupported refine-iteration checkpoint layout "
-            f"(version {version}, architecture {architecture!r})"
+            f"(version {version!r}, expected version {CHECKPOINT_VERSION} "
+            "with a supported draw basis and mean pooling)"
         )
     return args
 

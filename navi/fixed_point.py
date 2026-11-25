@@ -358,169 +358,6 @@ def _encode_tokens(embedding, blocks, features):
     return tokens
 
 
-@final
-class LegacyMixerEquation(AbstractEquation):
-    """Build both terms from per-row tokens and mixer blocks.
-
-    The equation reads only the latest iterate. Per row i, with read state
-    r_i = read(a_i) and observation y_i:
-
-    - encode: [r_i, y_i] -> state_embedding -> state_blocks -> context_i
-    - deterministic: context_i -> state_head
-    - per draw: [xi_i, context_i] -> draw_embedding -> draw_blocks -> draw_head
-
-    Args:
-        read: Channel mixer from D to D applied to the iterate, such as tanh.
-        draw_embedding: Channel mixer from the encoded state width plus one
-            draw value to the draw-path width.
-        draw_blocks: Mixer blocks of the draw-path width. May be empty.
-        draw_head: Channel mixer from the draw-path width to D.
-        state_embedding: Channel mixer from D + 1 to the draw-free width.
-        state_blocks: Mixer blocks of the draw-free width. May be empty.
-        state_head: Channel mixer from the draw-free width to D.
-    """
-
-    state_width: int = eqx.field(static=True)
-    history_capacity: int = eqx.field(static=True)
-    read: AbstractChannelMixer
-    draw_embedding: AbstractChannelMixer
-    draw_blocks: tuple[MixerBlock, ...]
-    draw_head: AbstractChannelMixer
-    state_embedding: AbstractChannelMixer
-    state_blocks: tuple[MixerBlock, ...]
-    state_head: AbstractChannelMixer
-
-    def __init__(
-        self,
-        read: AbstractChannelMixer,
-        draw_embedding: AbstractChannelMixer,
-        draw_blocks: tuple[MixerBlock, ...],
-        draw_head: AbstractChannelMixer,
-        state_embedding: AbstractChannelMixer,
-        state_blocks: tuple[MixerBlock, ...],
-        state_head: AbstractChannelMixer,
-    ):
-        self.state_width = read.out_width
-        self.history_capacity = 1
-        self.read = read
-        self.draw_embedding = draw_embedding
-        self.draw_blocks = tuple(draw_blocks)
-        self.draw_head = draw_head
-        self.state_embedding = state_embedding
-        self.state_blocks = tuple(state_blocks)
-        self.state_head = state_head
-
-    def __check_init__(self):
-        width = self.state_width
-        if self.read.in_width != width:
-            raise ValueError("read must map the state width to itself")
-        for name, embedding, blocks, head, input_width in (
-            (
-                "state",
-                self.state_embedding,
-                self.state_blocks,
-                self.state_head,
-                width + 1,
-            ),
-            (
-                "draw",
-                self.draw_embedding,
-                self.draw_blocks,
-                self.draw_head,
-                self.state_embedding.out_width + 1,
-            ),
-        ):
-            if embedding.in_width != input_width:
-                raise ValueError(f"{name} embedding must take {input_width} inputs")
-            if any(block.width != embedding.out_width for block in blocks):
-                raise ValueError(f"{name} blocks must match the embedding width")
-            if head.in_width != embedding.out_width or head.out_width != width:
-                raise ValueError(f"{name} head must map the token width to {width}")
-
-    def encode(self, history, valid, observations):
-        latest = jnp.where(valid[-1], history[-1], 0)
-        features = jnp.concatenate((self.read.apply(latest), observations), axis=-1)
-        return _encode_tokens(self.state_embedding, self.state_blocks, features)
-
-    def deterministic(self, context):
-        return self.state_head.apply(context)
-
-    def per_draw(self, context, draw):
-        features = jnp.concatenate((draw[:, None], context), axis=-1)
-        tokens = _encode_tokens(self.draw_embedding, self.draw_blocks, features)
-        return self.draw_head.apply(tokens)
-
-    def mean_per_draw(self, context, draws):
-        return jax.vmap(self.per_draw, in_axes=(None, 0))(context, draws).mean(axis=0)
-
-
-def build_legacy_mixer_equation(
-    state_width: int,
-    width: int,
-    *,
-    draw_depth: int = 1,
-    state_depth: int = 1,
-    draw_token_mixer: str = "mean",
-    state_token_mixer: str = "mean",
-    heads: int = 4,
-    attention_backend: Literal["xla", "cudnn"] = "xla",
-    hidden_ratio: int = 2,
-    read: Callable[[Array], Array] = jnp.asarray,
-    draw_embedding: AbstractChannelMixer | None = None,
-    key: Array,
-) -> LegacyMixerEquation:
-    """Build the version-5 equation with gated channel mixers.
-
-    Args:
-        state_width: Width D of the iterate.
-        width: Token width of both paths.
-        draw_depth: Number of mixer blocks on the draw path.
-        state_depth: Number of mixer blocks on the draw-free path.
-        draw_token_mixer: ``"mean"`` or ``"attention"`` for per-draw blocks.
-        state_token_mixer: ``"mean"`` or ``"attention"`` for state encoder blocks.
-        heads: Number of heads for attention blocks.
-        attention_backend: ``"xla"`` or ``"cudnn"`` for both attention paths.
-        hidden_ratio: Hidden width of each gated mixer relative to ``width``.
-        read: Elementwise read map applied to the iterate, identity by default.
-        draw_embedding: Optional mixer from ``width + 1`` to ``width``.
-            Defaults to a gated mixer with hidden width ``hidden_ratio * width``.
-        key: PRNG key.
-    """
-
-    keys = jax.random.split(key, 6)
-    if draw_embedding is None:
-        draw_embedding = GatedChannelMixer(
-            width + 1, hidden_ratio * width, out_width=width, key=keys[0]
-        )
-    if draw_embedding.out_width != width:
-        raise ValueError("draw embedding output width must match width")
-    return LegacyMixerEquation(
-        ElementwiseChannelMixer(state_width, read),
-        draw_embedding,
-        _make_mixer_blocks(
-            width,
-            draw_depth,
-            draw_token_mixer,
-            heads,
-            attention_backend,
-            hidden_ratio,
-            keys[1],
-        ),
-        LinearChannelMixer(width, state_width, key=keys[2]),
-        LinearChannelMixer(state_width + 1, width, key=keys[3]),
-        _make_mixer_blocks(
-            width,
-            state_depth,
-            state_token_mixer,
-            heads,
-            attention_backend,
-            hidden_ratio,
-            keys[4],
-        ),
-        LinearChannelMixer(width, state_width, key=keys[5]),
-    )
-
-
 def _make_mixer_blocks(
     width, depth, token_mixer, heads, attention_backend, hidden_ratio, key
 ):
@@ -644,12 +481,12 @@ class AbstractDrawPool(eqx.Module):
 
     @abstractmethod
     def __call__(self, coefficients: Array, basis_values: Array) -> Array:
-        """Pool two aligned [N, R] arrays into one score [R]."""
+        """Pool aligned [N, R, D] coefficients and [N, R] basis values into [R, D]."""
         raise NotImplementedError
 
     @abstractmethod
     def pool_block(self, coefficients: Array, basis_values: Array) -> Array:
-        """Pool [N, R] coefficients and [K, N, R] basis values into [K, R].
+        """Pool [N, R, D] coefficients and [K, N, R] basis values into [K, R, D].
 
         Each score must equal the corresponding single-draw score.
         """
@@ -658,14 +495,15 @@ class AbstractDrawPool(eqx.Module):
 
 @final
 class MeanDrawPool(AbstractDrawPool):
-    """Average the coefficient-weighted rows independently by basis channel."""
+    """Average rows independently for each basis and state channel."""
 
     def __call__(self, coefficients, basis_values):
-        return (coefficients * basis_values).mean(axis=0)
+        return (coefficients * basis_values[..., None]).mean(axis=0)
 
     def pool_block(self, coefficients, basis_values):
         return (
-            jnp.einsum("knr,nr->kr", basis_values, coefficients) / coefficients.shape[0]
+            jnp.einsum("knr,nrd->krd", basis_values, coefficients)
+            / coefficients.shape[0]
         )
 
 
@@ -698,50 +536,35 @@ class BasisDrawPath(AbstractDrawPath):
     coefficient_head: AbstractChannelMixer
     basis: AbstractDrawBasis
     pool: AbstractDrawPool
-    projection: eqx.nn.Linear
-
-    def __init__(
-        self,
-        coefficient_head: AbstractChannelMixer,
-        basis: AbstractDrawBasis,
-        pool: AbstractDrawPool,
-        state_width: int,
-        *,
-        key: Array,
-    ):
-        self.coefficient_head = coefficient_head
-        self.basis = basis
-        self.pool = pool
-        self.projection = eqx.nn.Linear(
-            basis.width, state_width, use_bias=False, key=key
-        )
+    state_width: int = eqx.field(static=True)
 
     @property
     def context_width(self) -> int:
         return self.coefficient_head.in_width
 
-    @property
-    def state_width(self) -> int:
-        return self.projection.out_features
-
     def __check_init__(self):
-        if self.coefficient_head.out_width != self.basis.width:
-            raise ValueError("coefficient head output width must match the basis width")
+        if type(self.state_width) is not int or self.state_width < 1:
+            raise ValueError("state width must be a positive integer")
+        if self.coefficient_head.out_width != self.basis.width * self.state_width:
+            raise ValueError(
+                "coefficient head output width must be basis width times state width"
+            )
 
     def prepare(self, features):
-        return self.coefficient_head.apply(features)
+        return self.coefficient_head.apply(features).reshape(
+            features.shape[0], self.basis.width, self.state_width
+        )
 
     def per_draw(self, prepared, draw):
         basis_values = jax.vmap(self.basis)(draw)
-        scores = self.pool(prepared, basis_values)
-        return (draw[:, None] * scores) @ self.projection.weight.T
+        scores = self.pool(prepared, basis_values).sum(axis=0)
+        return draw[:, None] * scores
 
     def mean_per_draw(self, prepared, draws):
         basis_values = jax.vmap(jax.vmap(self.basis))(draws)
-        scores = self.pool.pool_block(prepared, basis_values)
-        # Pair each draw with its own score and project only after averaging.
-        moments = (draws.T @ scores) / draws.shape[0]
-        return moments @ self.projection.weight.T
+        scores = self.pool.pool_block(prepared, basis_values).sum(axis=1)
+        # Contract each joint draw with its score without stacking [N, D] terms.
+        return (draws.T @ scores) / draws.shape[0]
 
 
 class MixerContext(NamedTuple):
@@ -800,10 +623,8 @@ def build_mixer_equation(
     """Build a mixer equation with a four-feature basis and row mean by default."""
     basis = FourFeatureDrawBasis() if basis is None else basis
     pool = MeanDrawPool() if pool is None else pool
-    # Reuse the legacy state keys so paired runs start from the same state path.
-    coeff_key, _, projection_key, embedding_key, blocks_key, head_key = (
-        jax.random.split(key, 6)
-    )
+    # Preserve the state initialization used for paired benchmarks.
+    coeff_key, _, _, embedding_key, blocks_key, head_key = jax.random.split(key, 6)
     state_path = MixerStatePath(
         ElementwiseChannelMixer(state_width, read),
         LinearChannelMixer(state_width + 1, width, key=embedding_key),
@@ -820,12 +641,14 @@ def build_mixer_equation(
     )
     draw_path = BasisDrawPath(
         GatedChannelMixer(
-            width, hidden_ratio * width, out_width=basis.width, key=coeff_key
+            width,
+            hidden_ratio * width,
+            out_width=basis.width * state_width,
+            key=coeff_key,
         ),
         basis,
         pool,
         state_width,
-        key=projection_key,
     )
     return MixerEquation(state_path, draw_path)
 

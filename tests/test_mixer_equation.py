@@ -22,7 +22,7 @@ from navi.fixed_point import (
 @final
 class _MaxDrawPool(AbstractDrawPool):
     def __call__(self, coefficients, basis_values):
-        return (coefficients * basis_values).max(axis=0)
+        return (coefficients * basis_values[..., None]).max(axis=0)
 
     def pool_block(self, coefficients, basis_values):
         return jax.vmap(self, in_axes=(None, 0))(coefficients, basis_values)
@@ -87,11 +87,14 @@ def test_identity_basis_mean_pool_retains_joint_draw_pairing():
     equation = build_mixer_equation(
         2, 4, basis=IdentityDrawBasis(), key=jax.random.key(1)
     )
-    coefficients = jnp.array([[1.0], [3.0]], dtype=jnp.float32)
-    draws = jnp.array([[2.0, 4.0], [-2.0, -4.0]], dtype=jnp.float32)
-    # Draw means are zero, but mean_j(A_j x_j) is +/-7 and x_i times
-    # that score is [14, 28] for both draws.
-    expected = jnp.array([[14.0], [28.0]]) @ equation.draw_path.projection.weight.T
+    coefficients = jnp.array([[[1.0, 4.0]], [[3.0, -1.0]]], dtype=jnp.float32)
+    draws = jnp.array(
+        [[2.0, 4.0], [-2.0, -4.0], [2.0, -2.0], [-2.0, 2.0]],
+        dtype=jnp.float32,
+    )
+    # Raw draws average to zero. The two positive-first draws have scores
+    # [7, 2] and [-2, 5], and their sign-reversed draws give the same terms.
+    expected = jnp.array([[5.0, 7.0], [16.0, -1.0]], dtype=jnp.float32)
     np.testing.assert_allclose(
         equation.draw_path.mean_per_draw(coefficients, draws), expected, atol=2e-6
     )
@@ -131,15 +134,8 @@ def test_mixer_rollout_can_resume_under_jit_vmap_and_grad():
         np.testing.assert_allclose(lhs, rhs, rtol=2e-5, atol=2e-6)
 
 
-@pytest.mark.parametrize(
-    ("version", "flags"),
-    [
-        (5, ["--draw-architecture", "legacy"]),
-        (6, ["--draw-basis", "identity"]),
-        (6, []),
-    ],
-)
-def test_mixer_checkpoint_roundtrip(tmp_path, version, flags):
+@pytest.mark.parametrize("flags", [[], ["--draw-basis", "identity"]])
+def test_mixer_checkpoint_roundtrip(tmp_path, flags):
     args = parse_args(
         [
             "--structured",
@@ -152,13 +148,9 @@ def test_mixer_checkpoint_roundtrip(tmp_path, version, flags):
     )
     metadata = vars(args) | {
         "output_dir": str(args.output_dir),
-        "checkpoint_version": version,
+        "checkpoint_version": 7,
         "draw_pool": "mean",
     }
-    if version == 5:
-        del metadata["draw_architecture"]
-        del metadata["draw_basis"]
-        del metadata["draw_pool"]
     (tmp_path / "run.json").write_text(json.dumps(metadata))
     key = jax.random.key(3)
     models = build_models(args, key, [-1.0, 0.0, 1.0])
@@ -182,14 +174,7 @@ def test_mixer_checkpoint_roundtrip(tmp_path, version, flags):
         atol=1e-6,
     )
 
-    metadata["checkpoint_version"] = 100
+    metadata["checkpoint_version"] = 6
     (tmp_path / "run.json").write_text(json.dumps(metadata))
     with pytest.raises(ValueError, match="unsupported.*checkpoint layout"):
         _checkpoint_args(tmp_path)
-
-
-def test_mixer_cli_rejects_legacy_draw_options_with_basis(capsys):
-    with pytest.raises(SystemExit) as error:
-        parse_args(["--draw-token-mixer", "attention"])
-    assert error.value.code == 2
-    assert "--draw-depth and --draw-token-mixer require" in capsys.readouterr().err

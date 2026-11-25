@@ -47,7 +47,6 @@ from navi.fixed_point import (
     IdentityDrawBasis,
     RunningMeanIntegrator,
     advance_chunk,
-    build_legacy_mixer_equation,
     build_mixer_equation,
 )
 from navi.helper import TrainingEpisode
@@ -64,8 +63,7 @@ from navi.simulation_data import SimulationDataset
 logger = logging.getLogger(__name__)
 advance_stored_chunk = eqx.filter_jit(advance_chunk)
 STRUCTURED_CALIBRATION_EPISODES = 1024
-LEGACY_CHECKPOINT_VERSION = 5
-CHECKPOINT_VERSION = 6
+CHECKPOINT_VERSION = 7
 DRAW_BASES = {"four-feature": FourFeatureDrawBasis, "identity": IdentityDrawBasis}
 
 
@@ -472,16 +470,9 @@ def parse_args(argv=None):
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument(
-        "--draw-architecture", choices=("basis", "legacy"), default="basis"
+        "--draw-basis", choices=tuple(DRAW_BASES), default="four-feature"
     )
-    parser.add_argument("--draw-basis", choices=tuple(DRAW_BASES))
-    parser.add_argument("--draw-depth", type=int, help="legacy draw mixer depth")
     parser.add_argument("--state-depth", type=int, default=1)
-    parser.add_argument(
-        "--draw-token-mixer",
-        choices=("mean", "attention"),
-        help="legacy draw token mixer",
-    )
     parser.add_argument(
         "--state-token-mixer", choices=("mean", "attention"), default="attention"
     )
@@ -559,26 +550,10 @@ def parse_args(argv=None):
             if getattr(args, name) is None:
                 setattr(args, name, default)
 
-    if args.draw_architecture == "basis":
-        if args.draw_depth is not None or args.draw_token_mixer is not None:
-            parser.error(
-                "--draw-depth and --draw-token-mixer require --draw-architecture legacy"
-            )
-        args.draw_basis = args.draw_basis or "four-feature"
-    else:
-        if args.draw_basis is not None:
-            parser.error("--draw-basis requires --draw-architecture basis")
-        if args.draw_depth is None:
-            args.draw_depth = 1
-        args.draw_token_mixer = args.draw_token_mixer or "mean"
-    if (args.draw_depth is not None and args.draw_depth < 0) or args.state_depth < 0:
-        parser.error("mixer depths must be nonnegative")
+    if args.state_depth < 0:
+        parser.error("--state-depth must be nonnegative")
     for name, value in vars(args).items():
-        if (
-            type(value) is int
-            and name not in ("seed", "draw_depth", "state_depth")
-            and value < 1
-        ):
+        if type(value) is int and name not in ("seed", "state_depth") and value < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.steps < 3 or args.t_max < 2:
         parser.error(
@@ -650,28 +625,16 @@ def _shuffled_indices(size, seed):
 def build_models(args, init, edges):
     # Preserve the original experiment's predictor initialization key.
     update_key, predictor_key, _, _ = jax.random.split(init, 4)
-    equation_options = {
-        "state_depth": args.state_depth,
-        "state_token_mixer": args.state_token_mixer,
-        "heads": args.heads,
-        "key": update_key,
-        "attention_backend": args.attention_backend,
-    }
-    if args.draw_architecture == "legacy":
-        equation = build_legacy_mixer_equation(
-            args.state_width,
-            args.width,
-            draw_depth=args.draw_depth,
-            draw_token_mixer=args.draw_token_mixer,
-            **equation_options,
-        )
-    else:
-        equation = build_mixer_equation(
-            args.state_width,
-            args.width,
-            basis=DRAW_BASES[args.draw_basis](),
-            **equation_options,
-        )
+    equation = build_mixer_equation(
+        args.state_width,
+        args.width,
+        state_depth=args.state_depth,
+        state_token_mixer=args.state_token_mixer,
+        heads=args.heads,
+        key=update_key,
+        attention_backend=args.attention_backend,
+        basis=DRAW_BASES[args.draw_basis](),
+    )
     update = FixedPointUpdate(equation, RunningMeanIntegrator())
     if args.readout == "no-context-last-context":
         encoder = NoContextEncoder(args.state_width)
@@ -746,15 +709,10 @@ def run(args):
         "output_dir": str(args.output_dir),
         "dataset": str(args.dataset) if dataset is not None else None,
         "reference_run": "modular-bayes-66615357",
-        "checkpoint_version": (
-            LEGACY_CHECKPOINT_VERSION
-            if args.draw_architecture == "legacy"
-            else CHECKPOINT_VERSION
-        ),
+        "checkpoint_version": CHECKPOINT_VERSION,
         "integrator": "running-mean",
         "state_read": "identity",
-        "draw_embedding": "gated" if args.draw_architecture == "legacy" else None,
-        "draw_pool": "mean" if args.draw_architecture == "basis" else None,
+        "draw_pool": "mean",
         "hidden_ratio": 2,
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "pre_norm": True,
