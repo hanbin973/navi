@@ -1,0 +1,14 @@
+{
+  "running-mean": {
+    "exit_code": 0
+  },
+  "sgd-momentum": {
+    "exit_code": 0
+  },
+  "adam": {
+    "exit_code": 0
+  },
+  "schedule-free": {
+    "exit_code": 0
+  }
+}

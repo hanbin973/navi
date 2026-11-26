@@ -41,6 +41,7 @@ from navi import (
     NoContextEncoder,
     rollout_loss,
 )
+from navi.averaging import AveragedUpdate, UniformAverager
 from navi.fixed_point import (
     ConstantFreeDrawBasis,
     FixedPointUpdate,
@@ -48,11 +49,18 @@ from navi.fixed_point import (
     IdentityDrawBasis,
     IdentityTanhConstantDrawBasis,
     IdentityTanhDrawBasis,
-    RunningMeanIntegrator,
     advance_chunk,
     build_mixer_equation,
 )
 from navi.helper import TrainingEpisode
+from navi.integrator import (
+    PolynomialGainIntegrator,
+    RunningMeanIntegrator,
+    adam,
+    polynomial_schedule,
+    schedule_free,
+    sgd,
+)
 from navi.simulation import (
     LOG2_VARIANCE_BOUNDS,
     kernel_features,
@@ -67,6 +75,25 @@ logger = logging.getLogger(__name__)
 advance_stored_chunk = eqx.filter_jit(advance_chunk)
 STRUCTURED_CALIBRATION_EPISODES = 1024
 CHECKPOINT_VERSION = 9
+
+
+def integrator_factories(args):
+    exponent = getattr(args, "gain_exponent", 0.67)
+    scale = getattr(args, "gain_scale", 1.0)
+    schedule = polynomial_schedule(exponent, scale)
+    return {
+        "running-mean": RunningMeanIntegrator,
+        "polynomial": lambda: PolynomialGainIntegrator(exponent, scale),
+        "averaging": lambda: PolynomialGainIntegrator(exponent, scale),
+        "sgd-momentum": lambda: sgd(schedule, momentum=getattr(args, "momentum", 0.9)),
+        "adam": lambda: adam(schedule),
+        "schedule-free": lambda: schedule_free(
+            getattr(args, "sf_learning_rate", 0.5), getattr(args, "sf_b1", 0.9)
+        ),
+    }
+
+
+INTEGRATORS = tuple(integrator_factories(argparse.Namespace()))
 STATE_READS = {"identity": jnp.asarray, "tanh": jnp.tanh}
 DRAW_BASES = {
     "four-feature": FourFeatureDrawBasis,
@@ -475,6 +502,12 @@ def write_evaluation(output, rows, t_max, bootstrap_seed):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--integrator", choices=INTEGRATORS, default="running-mean")
+    parser.add_argument("--gain-exponent", type=float, default=0.67)
+    parser.add_argument("--gain-scale", type=float, default=1.0)
+    parser.add_argument("--momentum", type=float, default=0.9)
+    parser.add_argument("--sf-learning-rate", type=float, default=0.5)
+    parser.add_argument("--sf-b1", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--state-width", type=int, default=16)
     parser.add_argument("--width", type=int, default=32)
@@ -550,6 +583,16 @@ def parse_args(argv=None):
     )
     parser.set_defaults(lr_schedule="warmup-cosine")
     args = parser.parse_args(argv)
+    if not 0.5 < args.gain_exponent <= 1:
+        parser.error("--gain-exponent must lie in (1/2, 1]")
+    if not np.isfinite(args.gain_scale) or args.gain_scale <= 0:
+        parser.error("--gain-scale must be finite and positive")
+    if not 0 <= args.momentum < 1:
+        parser.error("--momentum must lie in [0, 1)")
+    if not np.isfinite(args.sf_learning_rate) or args.sf_learning_rate <= 0:
+        parser.error("--sf-learning-rate must be finite and positive")
+    if not 0 < args.sf_b1 < 1:
+        parser.error("--sf-b1 must lie in (0, 1)")
     if args.structured:
         args.n = 512 if args.n is None else args.n
         args.queries = 8 if args.queries is None else args.queries
@@ -659,7 +702,10 @@ def build_models(args, init, edges):
         basis=DRAW_BASES[args.draw_basis](),
         row_basis=DRAW_BASES[getattr(args, "row_basis", "identity-tanh-constant")](),
     )
-    update = FixedPointUpdate(equation, RunningMeanIntegrator())
+    name = getattr(args, "integrator", "running-mean")
+    update = FixedPointUpdate(equation, integrator_factories(args)[name]())
+    if name == "averaging":
+        update = AveragedUpdate(update, UniformAverager())
     if args.readout == "no-context-last-context":
         encoder = NoContextEncoder(args.state_width)
         decoder = LastContextQueryDecoder(
@@ -734,7 +780,7 @@ def run(args):
         "dataset": str(args.dataset) if dataset is not None else None,
         "reference_run": "modular-bayes-66615357",
         "checkpoint_version": CHECKPOINT_VERSION,
-        "integrator": "running-mean",
+        "integrator": args.integrator,
         "draw_pool": "mean",
         "hidden_ratio": 2,
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),

@@ -33,7 +33,9 @@ changing them.
   pooling, proposal and integrator interfaces, and recurrent rollouts.
 - `navi/fixed_point.py` — deterministic state mixing and a separable draw
   equation with per-state-channel coefficients, configurable basis and row
-  pooling, stochastic-approximation integrators, and resumable rollouts.
+  pooling and resumable rollouts.
+- `navi/integrator.py` — stateful stochastic-approximation interfaces, gain
+  schedules, and Optax-backed SGD, Adam, and schedule-free integration.
 - `navi/averaging.py` — uniform and linearly weighted Polyak–Ruppert
   averaging for fixed-point snapshots.
 - `navi/predictor.py` — context encoder and query decoder interfaces, readout
@@ -71,6 +73,9 @@ changing them.
   draw features on both sides and row-mean pooling. Use `--draw-basis no-constant` to include
   shifted tanh on the pooled side or `--draw-basis identity` for a single
   pooled-side feature.
+  Select `--integrator` from running-mean, polynomial, averaging,
+  sgd-momentum, adam, or schedule-free; gain and optimizer flags are recorded
+  for checkpoint replay.
   Select the state mixer and depth with `--state-token-mixer` and
   `--state-depth`. Structured replay supports version-9 checkpoints.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
@@ -83,6 +88,8 @@ changing them.
 - `tests/test_bayes_update.py` — integration, history, prefix loss, symmetry, and gradients.
 - `tests/test_fixed_point.py` — axial estimate and gradient parity, resumed
   rollouts, readout bounding, and gain scheduling.
+- `tests/test_integrators.py` — gain parity, optimizer state/reset/resume,
+  gradients, readout, BLUP convergence, and integrator CLI/replay checks.
 - `tests/test_mixer_equation.py` — separable block reduction, gradients,
   resumed rollouts, and refine-iteration checkpoint compatibility.
 - `tests/test_pfn_port.py` — block initialization, additive attention bias, and masking.
