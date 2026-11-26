@@ -178,6 +178,7 @@ def test_default_basis_evaluates_identity_tanh_and_constant():
         ["--draw-basis", "identity"],
         ["--draw-basis", "no-constant"],
         ["--row-basis", "identity", "--draw-basis", "identity-tanh"],
+        ["--state-read", "tanh"],
     ],
 )
 def test_mixer_checkpoint_roundtrip(tmp_path, flags):
@@ -212,6 +213,11 @@ def test_mixer_checkpoint_roundtrip(tmp_path, flags):
     for expected, actual in zip(params, restored_params, strict=True):
         np.testing.assert_array_equal(actual, expected)
     update = models[0]
+    if args.state_read == "tanh":
+        state = jnp.full((3, args.state_width), 2.0)
+        np.testing.assert_array_equal(
+            update.equation.state_path.read.apply(state), jnp.tanh(state)
+        )
     carry = update.initial_state(3)
     draws = jnp.arange(6, dtype=jnp.float32).reshape(2, 3) / 5
     observations = jnp.array([[0.5], [-1.0], [0.1]], dtype=jnp.float32)

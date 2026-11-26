@@ -67,6 +67,7 @@ logger = logging.getLogger(__name__)
 advance_stored_chunk = eqx.filter_jit(advance_chunk)
 STRUCTURED_CALIBRATION_EPISODES = 1024
 CHECKPOINT_VERSION = 9
+STATE_READS = {"identity": jnp.asarray, "tanh": jnp.tanh}
 DRAW_BASES = {
     "four-feature": FourFeatureDrawBasis,
     "identity-tanh-constant": IdentityTanhConstantDrawBasis,
@@ -487,6 +488,12 @@ def parse_args(argv=None):
         default="identity-tanh-constant",
         help="basis applied to the output row's draw value",
     )
+    parser.add_argument(
+        "--state-read",
+        choices=tuple(STATE_READS),
+        default="identity",
+        help="function applied to the committed state before the update encoder",
+    )
     parser.add_argument("--state-depth", type=int, default=1)
     parser.add_argument(
         "--state-token-mixer", choices=("mean", "attention"), default="attention"
@@ -648,6 +655,7 @@ def build_models(args, init, edges):
         heads=args.heads,
         key=update_key,
         attention_backend=args.attention_backend,
+        read=STATE_READS[getattr(args, "state_read", "identity")],
         basis=DRAW_BASES[args.draw_basis](),
         row_basis=DRAW_BASES[getattr(args, "row_basis", "identity-tanh-constant")](),
     )
@@ -727,7 +735,6 @@ def run(args):
         "reference_run": "modular-bayes-66615357",
         "checkpoint_version": CHECKPOINT_VERSION,
         "integrator": "running-mean",
-        "state_read": "identity",
         "draw_pool": "mean",
         "hidden_ratio": 2,
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),

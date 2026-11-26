@@ -2,3 +2,12 @@
 
 __pycache__/
 *.out
+
+# Incomplete refine-iteration runs
+/runs/refine-iteration-66835326/
+/runs/refine-iteration-66835327/
+/runs/refine-iteration-66837595/
+/runs/refine-iteration-66837596/
+/runs/refine-iteration-66838207/
+/runs/refine-iteration-66838810/
+/runs/refine-iteration-66843389/
