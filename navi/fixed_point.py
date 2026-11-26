@@ -25,6 +25,11 @@ import jax.numpy as jnp
 from jax import Array
 
 from .blocks import _cudnn_attention, _features
+from .integrator import (
+    AbstractIntegrator,
+    PolynomialGainIntegrator,  # noqa: F401 -- compatibility export
+    RunningMeanIntegrator,  # noqa: F401 -- compatibility export
+)
 
 EquationContext = Any
 """PyTree returned by ``AbstractEquation.encode`` and consumed by its terms."""
@@ -39,12 +44,14 @@ class SolutionCarry(NamedTuple):
         valid: Boolean mask [H] marking initialized history slots.
         step: Scalar count of committed draw blocks.
         draw_count: Scalar count of individual joint draws consumed.
+        integrator_state: Optimizer state PyTree; empty for scalar-gain updates.
     """
 
     history: Array
     valid: Array
     step: Array
     draw_count: Array
+    integrator_state: Any = ()
 
 
 class ContextSnapshot(NamedTuple):
@@ -718,84 +725,19 @@ def build_mixer_equation(
 # Integration ----------------------------------------------------------------
 
 
-class AbstractIntegrator(eqx.Module):
-    """Take a linear stochastic-approximation step with a scheduled gain.
-
-    Implementations choose only the gain. The shared ``__call__`` applies
-
-        latest <- latest + gain * (estimate - latest)
-
-    which is linear in the estimate, so the per-draw structure of the
-    estimate carries over to the iterate. The gain receives the cumulative
-    draw count after the current block and the static block size.
-    """
-
-    @abstractmethod
-    def gain(self, draw_count: Array, block_size: int) -> Array:
-        """Return the gain, a scalar in (0, 1].
-
-        The gain must equal 1 for the first block so the zero initialization
-        is forgotten. The usual Robbins–Monro gain conditions are a
-        divergent sum and a finite sum of squares.
-        """
-        raise NotImplementedError
-
-    def __call__(
-        self, latest: Array, estimate: Array, draw_count: Array, block_size: int
-    ) -> tuple[Array, Array]:
-        """Return the next iterate and the drift, both shaped [N, D]."""
-        drift = estimate - latest
-        return latest + self.gain(draw_count, block_size) * drift, drift
-
-
-@final
-class RunningMeanIntegrator(AbstractIntegrator):
-    """Use gain K / n_t, which weights block estimates by their draw counts.
-
-    Constant-size blocks give a gain of 1/t at block step t.
-    """
-
-    def gain(self, draw_count, block_size):
-        return block_size / jnp.asarray(draw_count, dtype=jnp.float32)
-
-
-@final
-class PolynomialGainIntegrator(AbstractIntegrator):
-    """Use gain one initially, then min(1, scale * K * n_t^(-exponent)).
-
-    Args:
-        exponent: Gain decay exponent in (1/2, 1].
-        scale: Positive gain scale.
-    """
-
-    exponent: float = eqx.field(static=True, default=0.67)
-    scale: float = eqx.field(static=True, default=1.0)
-
-    def gain(self, draw_count, block_size):
-        draws = jnp.asarray(draw_count, dtype=jnp.float32)
-        scheduled = jnp.minimum(1.0, self.scale * block_size * draws**-self.exponent)
-        return jnp.where(draw_count == block_size, 1.0, scheduled)
-
-    def __check_init__(self):
-        if not 0.5 < self.exponent <= 1:
-            raise ValueError("exponent must lie in (1/2, 1]")
-        if not self.scale > 0:
-            raise ValueError("scale must be positive")
-
-
 @final
 class FixedPointUpdate(eqx.Module):
     """Consume draw blocks and manage the committed iterates.
 
     Each step asks the equation for one estimate, passes it to the
-    integrator, and commits the next iterate. ``snapshot`` exposes the latest
-    iterate as it is stored.
+    integrator, and commits the next iterate. ``snapshot`` applies the
+    integrator readout, which may expose a separate evaluation sequence.
 
     Args:
         equation: Module mapping committed history and a block of joint draws
             to an unbiased estimate of its mean-field map. Its dimensions
             determine the carry shape.
-        integrator: Module applying the scheduled gain.
+        integrator: Module advancing the iterate and its optimizer state.
     """
 
     equation: AbstractEquation
@@ -806,15 +748,21 @@ class FixedPointUpdate(eqx.Module):
             raise ValueError("at least one context token is required")
         capacity = self.equation.history_capacity
         width = self.equation.state_width
+        zeros = jnp.zeros((capacity, n, width), dtype=jnp.float32)
         return SolutionCarry(
-            jnp.zeros((capacity, n, width), dtype=jnp.float32),
+            zeros,
             jnp.arange(capacity) == capacity - 1,
             jnp.int32(0),
             jnp.int32(0),
+            self.integrator.init(zeros[-1]),
         )
 
     def snapshot(self, carry: SolutionCarry, observations: Array) -> ContextSnapshot:
-        return ContextSnapshot(observations, carry.history[-1], carry.draw_count)
+        return ContextSnapshot(
+            observations,
+            self.integrator.readout(carry.history[-1], carry.integrator_state),
+            carry.draw_count,
+        )
 
     def _integrate(self, carry, draws, observations):
         n = carry.history.shape[1]
@@ -829,10 +777,10 @@ class FixedPointUpdate(eqx.Module):
             estimate, (n, self.equation.state_width), "equation estimate"
         )
         draw_count = carry.draw_count + block_size
-        latest, drift = self.integrator(
-            carry.history[-1], estimate, draw_count, block_size
+        latest, drift, state = self.integrator(
+            carry.history[-1], estimate, draw_count, block_size, carry.integrator_state
         )
-        return latest, drift, draw_count
+        return latest, drift, draw_count, state
 
     def drift(self, carry: SolutionCarry, draws: Array, observations: Array) -> Array:
         """Evaluate drift against a fixed carry without committing."""
@@ -842,10 +790,10 @@ class FixedPointUpdate(eqx.Module):
         self, carry: SolutionCarry, draws: Array, observations: Array
     ) -> tuple[SolutionCarry, Array]:
         """Consume one draw [N] or block [K, N] and commit one iterate."""
-        latest, drift, draw_count = self._integrate(carry, draws, observations)
+        latest, drift, draw_count, state = self._integrate(carry, draws, observations)
         history = jnp.concatenate((carry.history[1:], latest[None]), axis=0)
         valid = jnp.concatenate((carry.valid[1:], jnp.ones((1,), dtype=bool)))
-        return SolutionCarry(history, valid, carry.step + 1, draw_count), drift
+        return SolutionCarry(history, valid, carry.step + 1, draw_count, state), drift
 
 
 def advance_chunk(update, carry, draws: Array, observations: Array):

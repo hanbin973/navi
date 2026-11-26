@@ -21,6 +21,7 @@ from experiments.refine_iteration.correlation import (
 from experiments.refine_iteration.run import (
     CHECKPOINT_VERSION,
     DRAW_BASES,
+    INTEGRATORS,
     build_models,
     evaluate,
     sample_structured_episode,
@@ -94,6 +95,7 @@ def _checkpoint_args(run):
     version = getattr(args, "checkpoint_version", None)
     if (
         version != CHECKPOINT_VERSION
+        or getattr(args, "integrator", "running-mean") not in INTEGRATORS
         or getattr(args, "draw_basis", None) not in tuple(DRAW_BASES)
         or getattr(args, "draw_pool", None) != "mean"
     ):
