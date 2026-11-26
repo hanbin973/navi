@@ -31,8 +31,9 @@ changing them.
 
 - `navi/bayes_update.py` — axial proposal, prefix-conditioned Deep Sets draw
   pooling, proposal and integrator interfaces, and recurrent rollouts.
-- `navi/fixed_point.py` — per-draw axial equations, stochastic-approximation
-  integrators, resumable rollouts, and the shared context snapshot.
+- `navi/fixed_point.py` — deterministic state mixing and a separable draw
+  equation with per-state-channel coefficients, configurable basis and row
+  pooling, stochastic-approximation integrators, and resumable rollouts.
 - `navi/averaging.py` — uniform and linearly weighted Polyak–Ruppert
   averaging for fixed-point snapshots.
 - `navi/predictor.py` — context encoder and query decoder interfaces, readout
@@ -64,6 +65,14 @@ changing them.
   `python -m experiments.fixed_point.run` with `--integrator running-mean`
   (the default), `--integrator polynomial`, or `--integrator averaging`
   for polynomial updates with uniform iterate averaging.
+- `experiments/refine_iteration/` — mixer-equation training, prefix evaluation,
+  dataset generation, and structured checkpoint replay using identity state
+  read and running-mean integration. New runs default to identity, tanh, and constant
+  draw features on both sides and row-mean pooling. Use `--draw-basis no-constant` to include
+  shifted tanh on the pooled side or `--draw-basis identity` for a single
+  pooled-side feature.
+  Select the state mixer and depth with `--state-token-mixer` and
+  `--state-depth`. Structured replay supports version-9 checkpoints.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
   and held-out extrapolation evaluation. Replay from the original commit.
 - `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322
@@ -74,6 +83,8 @@ changing them.
 - `tests/test_bayes_update.py` — integration, history, prefix loss, symmetry, and gradients.
 - `tests/test_fixed_point.py` — axial estimate and gradient parity, resumed
   rollouts, readout bounding, and gain scheduling.
+- `tests/test_mixer_equation.py` — separable block reduction, gradients,
+  resumed rollouts, and refine-iteration checkpoint compatibility.
 - `tests/test_pfn_port.py` — block initialization, additive attention bias, and masking.
 - `tests/test_navi_helper.py` — kernel alignment, joint simulation, BLUP
   reference, and training episode checks.
@@ -83,6 +94,9 @@ changing them.
 - `tests/test_navi_model.py` — predictor context reuse, input validation, and bar-distribution checks.
 
 ## Design notes
+
+- `impl/improve_iteration/draft_improve_iteration.md` — separable mixer design,
+  implementation plan, and verification record.
 
 - `impl/modular_readout/` — readout component design and implementation plan.
 - `impl/attention_update/` — axial proposal design, implementation plan, and
