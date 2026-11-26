@@ -67,12 +67,12 @@ changing them.
   for polynomial updates with uniform iterate averaging.
 - `experiments/refine_iteration/` — mixer-equation training, prefix evaluation,
   dataset generation, and structured checkpoint replay using identity state
-  read and running-mean integration. New runs default to the identity and tanh draw
-  basis on both sides and row-mean pooling. Use `--draw-basis no-constant` to include
+  read and running-mean integration. New runs default to identity, tanh, and constant
+  draw features on both sides and row-mean pooling. Use `--draw-basis no-constant` to include
   shifted tanh on the pooled side or `--draw-basis identity` for a single
   pooled-side feature.
   Select the state mixer and depth with `--state-token-mixer` and
-  `--state-depth`. Structured replay supports version-8 checkpoints.
+  `--state-depth`. Structured replay supports version-9 checkpoints.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
   and held-out extrapolation evaluation. Replay from the original commit.
 - `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322

@@ -445,6 +445,11 @@ class AbstractDrawBasis(eqx.Module):
         """Return basis values shaped [width] in the draw dtype."""
         raise NotImplementedError
 
+    def components(self, values: Array) -> tuple[Array, ...]:
+        """Return one array per feature, each with the shape of values."""
+        stacked = jax.vmap(self)(values.reshape(-1)).reshape(*values.shape, self.width)
+        return tuple(jnp.moveaxis(stacked, -1, 0))
+
     def __check_init__(self):
         if type(self.width) is not int or self.width < 1:
             raise ValueError("basis width must be a positive integer")
@@ -457,7 +462,23 @@ class IdentityTanhDrawBasis(AbstractDrawBasis):
     width: int = eqx.field(static=True, init=False, default=2)
 
     def __call__(self, value):
-        return jnp.stack((value, jnp.tanh(value)))
+        return jnp.stack(self.components(value))
+
+    def components(self, values):
+        return values, jnp.tanh(values)
+
+
+@final
+class IdentityTanhConstantDrawBasis(AbstractDrawBasis):
+    """Evaluate identity, tanh, and constant features in that order."""
+
+    width: int = eqx.field(static=True, init=False, default=3)
+
+    def __call__(self, value):
+        return jnp.stack(self.components(value))
+
+    def components(self, values):
+        return values, jnp.tanh(values), jnp.ones_like(values)
 
 
 @final
@@ -467,10 +488,25 @@ class ConstantFreeDrawBasis(AbstractDrawBasis):
     width: int = eqx.field(static=True, init=False, default=3)
 
     def __call__(self, value):
-        one = jnp.ones_like(value)
-        return jnp.stack(
-            (value, jnp.tanh(value), jnp.tanh(value + one) - jnp.tanh(one))
-        )
+        return jnp.stack(self.components(value))
+
+    def components(self, values):
+        one = jnp.ones_like(values)
+        return values, jnp.tanh(values), jnp.tanh(values + one) - jnp.tanh(one)
+
+
+@final
+class FourFeatureDrawBasis(AbstractDrawBasis):
+    """Evaluate constant, identity, tanh, and shifted tanh features."""
+
+    width: int = eqx.field(static=True, init=False, default=4)
+
+    def __call__(self, value):
+        return jnp.stack(self.components(value))
+
+    def components(self, values):
+        one = jnp.ones_like(values)
+        return one, values, jnp.tanh(values), jnp.tanh(values + one) - jnp.tanh(one)
 
 
 @final
@@ -481,6 +517,9 @@ class IdentityDrawBasis(AbstractDrawBasis):
 
     def __call__(self, value):
         return value[None]
+
+    def components(self, values):
+        return (values,)
 
 
 class AbstractDrawPool(eqx.Module):
@@ -569,20 +608,22 @@ class BasisDrawPath(AbstractDrawPath):
 
     def per_draw(self, prepared, draw):
         basis_values = jax.vmap(self.basis)(draw)
-        row_values = jax.vmap(self.row_basis)(draw)
-        pooled = jax.vmap(self.pool, in_axes=(2, None), out_axes=1)(
-            prepared, basis_values
+        terms = tuple(
+            values[:, None] * self.pool(prepared[:, :, r, :], basis_values).sum(axis=0)
+            for r, values in enumerate(self.row_basis.components(draw))
         )
-        return row_values @ pooled.sum(axis=0)
+        return sum(terms[1:], terms[0])
 
     def mean_per_draw(self, prepared, draws):
         basis_values = jax.vmap(jax.vmap(self.basis))(draws)
-        row_values = jax.vmap(jax.vmap(self.row_basis))(draws)
-        pooled = jax.vmap(self.pool.pool_block, in_axes=(2, None), out_axes=2)(
-            prepared, basis_values
+        # Pool each output feature independently to preserve the row and draw
+        # axes in the batched GPU contraction.
+        terms = tuple(
+            values.T
+            @ self.pool.pool_block(prepared[:, :, r, :], basis_values).sum(axis=1)
+            for r, values in enumerate(self.row_basis.components(draws))
         )
-        scores = pooled.sum(axis=1)
-        return jnp.einsum("kns,ksd->nd", row_values, scores) / draws.shape[0]
+        return sum(terms[1:], terms[0]) / draws.shape[0]
 
 
 class MixerContext(NamedTuple):
@@ -639,9 +680,9 @@ def build_mixer_equation(
     pool: AbstractDrawPool | None = None,
     key: Array,
 ) -> MixerEquation:
-    """Build a mixer equation with identity and tanh on both sides by default."""
-    basis = IdentityTanhDrawBasis() if basis is None else basis
-    row_basis = IdentityTanhDrawBasis() if row_basis is None else row_basis
+    """Build a mixer equation with identity, tanh, and a constant on both sides by default."""
+    basis = IdentityTanhConstantDrawBasis() if basis is None else basis
+    row_basis = IdentityTanhConstantDrawBasis() if row_basis is None else row_basis
     pool = MeanDrawPool() if pool is None else pool
     # Preserve the state initialization used for paired benchmarks.
     coeff_key, _, _, embedding_key, blocks_key, head_key = jax.random.split(key, 6)

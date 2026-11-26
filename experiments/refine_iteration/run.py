@@ -44,7 +44,9 @@ from navi import (
 from navi.fixed_point import (
     ConstantFreeDrawBasis,
     FixedPointUpdate,
+    FourFeatureDrawBasis,
     IdentityDrawBasis,
+    IdentityTanhConstantDrawBasis,
     IdentityTanhDrawBasis,
     RunningMeanIntegrator,
     advance_chunk,
@@ -64,8 +66,10 @@ from navi.simulation_data import SimulationDataset
 logger = logging.getLogger(__name__)
 advance_stored_chunk = eqx.filter_jit(advance_chunk)
 STRUCTURED_CALIBRATION_EPISODES = 1024
-CHECKPOINT_VERSION = 8
+CHECKPOINT_VERSION = 9
 DRAW_BASES = {
+    "four-feature": FourFeatureDrawBasis,
+    "identity-tanh-constant": IdentityTanhConstantDrawBasis,
     "identity-tanh": IdentityTanhDrawBasis,
     "no-constant": ConstantFreeDrawBasis,
     "identity": IdentityDrawBasis,
@@ -475,7 +479,13 @@ def parse_args(argv=None):
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument(
-        "--draw-basis", choices=tuple(DRAW_BASES), default="identity-tanh"
+        "--draw-basis", choices=tuple(DRAW_BASES), default="identity-tanh-constant"
+    )
+    parser.add_argument(
+        "--row-basis",
+        choices=tuple(DRAW_BASES),
+        default="identity-tanh-constant",
+        help="basis applied to the output row's draw value",
     )
     parser.add_argument("--state-depth", type=int, default=1)
     parser.add_argument(
@@ -639,6 +649,7 @@ def build_models(args, init, edges):
         key=update_key,
         attention_backend=args.attention_backend,
         basis=DRAW_BASES[args.draw_basis](),
+        row_basis=DRAW_BASES[getattr(args, "row_basis", "identity-tanh-constant")](),
     )
     update = FixedPointUpdate(equation, RunningMeanIntegrator())
     if args.readout == "no-context-last-context":

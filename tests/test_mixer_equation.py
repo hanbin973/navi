@@ -111,8 +111,8 @@ def test_identity_basis_mean_pool_retains_joint_draw_pairing():
 def test_default_draw_path_matches_basis_pair_sum():
     equation = build_mixer_equation(2, 4, key=jax.random.key(1))
     draws = jnp.array([[0.2, -0.9, 1.4], [-1.6, 0.4, 0.7]])
-    coefficients = jnp.arange(24, dtype=draws.dtype).reshape(3, 2, 2, 2) / 7
-    features = jnp.stack((draws, jnp.tanh(draws)), axis=-1)
+    coefficients = jnp.arange(54, dtype=draws.dtype).reshape(3, 3, 3, 2) / 54
+    features = jnp.stack((draws, jnp.tanh(draws), jnp.ones_like(draws)), axis=-1)
     terms = (
         features[:, None, :, :, None, None]
         * features[:, :, None, None, :, None]
@@ -157,20 +157,28 @@ def test_mixer_rollout_can_resume_under_jit_vmap_and_grad():
         np.testing.assert_allclose(lhs, rhs, rtol=2e-5, atol=2e-6)
 
 
-def test_default_basis_evaluates_identity_and_tanh():
+def test_default_basis_evaluates_identity_tanh_and_constant():
     draws = jnp.array([-1.0, 0.0, 0.5], dtype=jnp.float32)
     equation = build_mixer_equation(2, 4, key=jax.random.key(0))
     basis = equation.draw_path.basis
     features = jax.jit(jax.vmap(basis))(draws)
-    assert basis.width == 2
+    assert basis.width == 3
     assert features.dtype == draws.dtype
     np.testing.assert_allclose(
-        features, jnp.stack((draws, jnp.tanh(draws)), axis=-1), atol=1e-7
+        features,
+        jnp.stack((draws, jnp.tanh(draws), jnp.ones_like(draws)), axis=-1),
+        atol=1e-7,
     )
 
 
 @pytest.mark.parametrize(
-    "flags", [[], ["--draw-basis", "identity"], ["--draw-basis", "no-constant"]]
+    "flags",
+    [
+        [],
+        ["--draw-basis", "identity"],
+        ["--draw-basis", "no-constant"],
+        ["--row-basis", "identity", "--draw-basis", "identity-tanh"],
+    ],
 )
 def test_mixer_checkpoint_roundtrip(tmp_path, flags):
     args = parse_args(
@@ -184,7 +192,7 @@ def test_mixer_checkpoint_roundtrip(tmp_path, flags):
         ]
     )
     if not flags:
-        assert args.draw_basis == "identity-tanh"
+        assert args.draw_basis == "identity-tanh-constant"
     metadata = vars(args) | {
         "output_dir": str(args.output_dir),
         "checkpoint_version": CHECKPOINT_VERSION,
