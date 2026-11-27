@@ -52,12 +52,26 @@ def test_pairwise_outputs_gradients_and_batching():
     np.testing.assert_allclose(actual, mapped, atol=2e-6, rtol=2e-5)
 
 
-def test_empty_masked_and_rejected_pairwise_memory():
-    q = jnp.ones((1, 3, 2, 4))
+@pytest.mark.parametrize(
+    "direct,mixed", [(False, False), (True, False), (False, True), (True, True)]
+)
+def test_empty_masked_and_rejected_pairwise_memory(direct, mixed):
+    q = jnp.ones((1, 1 if direct else 3, 2, 4))
     k = jnp.ones((1, 5, 2, 4))
-    np.testing.assert_array_equal(_linear_attention(q, k[:, :0], k[:, :0]), 0)
     np.testing.assert_array_equal(
-        _linear_attention(q, k, k, mask=jnp.zeros((1, 1, 1, 5), bool)), 0
+        _linear_attention(q, k[:, :0], k[:, :0], direct=direct, mixed_precision=mixed),
+        0,
+    )
+    np.testing.assert_array_equal(
+        _linear_attention(
+            q,
+            k,
+            k,
+            mask=jnp.zeros((1, 1, 1, 5), bool),
+            direct=direct,
+            mixed_precision=mixed,
+        ),
+        0,
     )
     with pytest.raises(ValueError, match="key-only mask"):
         _linear_attention(q, k, k, mask=jnp.ones((1, 1, 3, 5), bool))
@@ -82,7 +96,10 @@ def test_state_mixer_permutation_and_grad():
     assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree.leaves(grad))
 
 
-def test_refine_rollout_loss_and_grad(tmp_path):
+@pytest.mark.parametrize(
+    "backend", ["linear", "linear-direct", "linear-bf16", "linear-direct-bf16"]
+)
+def test_refine_rollout_loss_and_grad(tmp_path, backend):
     from experiments.refine_iteration.run import build_models, parse_args
     from navi.training import rollout_loss
 
@@ -90,7 +107,7 @@ def test_refine_rollout_loss_and_grad(tmp_path):
         [
             "--structured",
             "--attention-backend",
-            "linear",
+            backend,
             "--state-token-mixer",
             "attention",
             "--draw-basis",
@@ -134,3 +151,43 @@ def test_refine_rollout_loss_and_grad(tmp_path):
     assert bool(jnp.isfinite(value))
     assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree.leaves(grads))
     assert any(bool(jnp.any(x != 0)) for x in jax.tree.leaves(grads))
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("query_count", [1, 3])
+def test_direct_outputs_and_derivatives(mixed, query_count):
+    keys = jax.random.split(jax.random.key(43), 4)
+    args = (
+        jax.random.normal(keys[0], (2, query_count, 2, 4)),
+        jax.random.normal(keys[1], (2, 7, 2, 4)),
+        jax.random.normal(keys[2], (2, 7, 2, 3)),
+        jax.random.normal(keys[3], (2, 2, 1, 7)),
+    )
+    mask = jnp.array([True, False, True, True, False, True, True])[None, None, None]
+
+    def optimized(*args):
+        return _linear_attention(*args, mask, direct=True, mixed_precision=mixed)
+
+    expected = explicit(*args, mask)
+    output = jax.jit(optimized)(*args)
+    np.testing.assert_allclose(
+        output, expected, atol=0.012 if mixed else 2e-6, rtol=0.02 if mixed else 2e-5
+    )
+    grads = jax.jit(
+        jax.grad(lambda *args: (optimized(*args) ** 2).sum(), argnums=(0, 1, 2, 3))
+    )(*args)
+    oracle_grads = jax.grad(
+        lambda *args: (explicit(*args, mask) ** 2).sum(), argnums=(0, 1, 2, 3)
+    )(*args)
+    for actual, reference in zip(grads, oracle_grads, strict=True):
+        relative_error = jnp.linalg.norm(actual - reference) / jnp.maximum(
+            jnp.linalg.norm(reference), 1e-6
+        )
+        assert float(relative_error) < (0.04 if mixed else 2e-5)
+    mapped = jax.jit(
+        jax.vmap(lambda q, k, v, b: optimized(q[None], k[None], v[None], b[None])[0])
+    )(*args)
+    np.testing.assert_allclose(
+        output, mapped, atol=1e-3 if mixed else 1e-6, rtol=5e-3 if mixed else 1e-5
+    )
+    assert output.dtype == jnp.float32

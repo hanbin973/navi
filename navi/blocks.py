@@ -8,6 +8,15 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+ATTENTION_BACKENDS = (
+    "xla",
+    "cudnn",
+    "linear",
+    "linear-direct",
+    "linear-bf16",
+    "linear-direct-bf16",
+)
+
 
 def _cudnn_attention(query, key, value, bias, mask):
     query_count = query.shape[1]
@@ -43,11 +52,16 @@ def _cudnn_attention(query, key, value, bias, mask):
     return heads[:, :query_count].astype(query.dtype)
 
 
-def _linear_attention(query, key, value, bias=None, mask=None):
+def _linear_attention(
+    query, key, value, bias=None, mask=None, *, direct=False, mixed_precision=False
+):
     """ELU+1 kernel attention with FP32 summaries and key-only log weights.
 
     Pairwise and causal masks are rejected to avoid quadratic intermediates.
-    Empty or fully masked memory returns zero.
+    Empty or fully masked memory returns zero. ``direct`` avoids K^T V when
+    there is exactly one query. ``mixed_precision`` uses BF16 dot operands,
+    with FP32 accumulation, key sums, normalization, and output before casting.
+    Parameters and surrounding projections remain FP32.
     """
     q = jax.nn.elu(query.astype(jnp.float32)) + 1
     k = jax.nn.elu(key.astype(jnp.float32)) + 1
@@ -64,9 +78,29 @@ def _linear_attention(query, key, value, bias=None, mask=None):
             raise ValueError("linear attention requires key-only mask")
         weights = weights * mask
     k = k * weights[:, :, 0, :].transpose(0, 2, 1)[..., None]
-    summary = jnp.einsum("bshd,bshv->bhdv", k, v)
-    numerator = jnp.einsum("bthd,bhdv->bthv", q, summary)
-    denominator = jnp.einsum("bthd,bhd->bth", q, k.sum(axis=1))
+    dtype = jnp.bfloat16 if mixed_precision else jnp.float32
+    q, k, v = q.astype(dtype), k.astype(dtype), v.astype(dtype)
+
+    def contract(equation, left, right):
+        return jnp.einsum(
+            equation,
+            left.astype(dtype),
+            right.astype(dtype),
+            preferred_element_type=jnp.float32,
+        )
+
+    if direct and query.shape[1] == 1:
+        scores = contract("bthd,bshd->bhts", q, k)
+        numerator = contract("bhts,bshv->bthv", scores, v)
+        denominator = scores.sum(axis=-1).transpose(0, 2, 1)
+    else:
+        summary = contract("bshd,bshv->bhdv", k, v)
+        numerator = contract("bthd,bhdv->bthv", q, summary)
+        denominator = jnp.einsum(
+            "bthd,bhd->bth",
+            q.astype(jnp.float32),
+            k.astype(jnp.float32).sum(axis=1),
+        )
     return (numerator / jnp.maximum(denominator[..., None], 1e-6)).astype(query.dtype)
 
 
@@ -79,8 +113,8 @@ class _Attention(eqx.Module):
     backend: str = eqx.field(static=True)
 
     def __init__(self, width, heads, *, zero_init, key, init_gain=1.0, backend="xla"):
-        if backend not in ("xla", "cudnn", "linear"):
-            raise ValueError("attention backend must be xla, cudnn, or linear")
+        if backend not in ATTENTION_BACKENDS:
+            raise ValueError(f"attention backend must be one of {ATTENTION_BACKENDS}")
         self.backend = backend
         depth = width // heads
         shape = (heads, depth, width)
@@ -107,8 +141,16 @@ class _Attention(eqx.Module):
 
     def __call__(self, query, source, *, bias=None, mask=None):
         q, k, v = self.project(query, source)
-        if self.backend == "linear":
-            heads = _linear_attention(q, k, v, bias, mask)
+        if self.backend.startswith("linear"):
+            heads = _linear_attention(
+                q,
+                k,
+                v,
+                bias,
+                mask,
+                direct="direct" in self.backend,
+                mixed_precision="bf16" in self.backend,
+            )
         elif self.backend == "cudnn":
             heads = _cudnn_attention(q, k, v, bias, mask)
         else:

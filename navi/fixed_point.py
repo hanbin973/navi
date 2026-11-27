@@ -17,14 +17,14 @@ of those joint draws.
 
 from abc import abstractmethod
 from collections.abc import Callable
-from typing import Any, Literal, NamedTuple, final
+from typing import Any, NamedTuple, final
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax import Array
 
-from .blocks import _cudnn_attention, _features, _linear_attention
+from .blocks import ATTENTION_BACKENDS, _cudnn_attention, _features, _linear_attention
 from .integrator import (
     AbstractIntegrator,
     PolynomialGainIntegrator,  # noqa: F401 -- compatibility export
@@ -217,7 +217,7 @@ class AttentionTokenMixer(AbstractTokenMixer):
 
     width: int = eqx.field(static=True)
     heads: int = eqx.field(static=True)
-    backend: Literal["xla", "cudnn", "linear"] = eqx.field(static=True)
+    backend: str = eqx.field(static=True)
     query_proj: eqx.nn.Linear
     key_proj: eqx.nn.Linear
     value_proj: eqx.nn.Linear
@@ -228,15 +228,15 @@ class AttentionTokenMixer(AbstractTokenMixer):
         width: int,
         heads: int,
         *,
-        backend: Literal["xla", "cudnn", "linear"] = "xla",
+        backend: str = "xla",
         key: Array,
     ):
         if type(heads) is not int or heads < 1:
             raise ValueError("heads must be a positive integer")
         if width % heads:
             raise ValueError("width must be divisible by heads")
-        if backend not in ("xla", "cudnn", "linear"):
-            raise ValueError("attention backend must be xla, cudnn, or linear")
+        if backend not in ATTENTION_BACKENDS:
+            raise ValueError(f"attention backend must be one of {ATTENTION_BACKENDS}")
         self.width = width
         self.heads = heads
         self.backend = backend
@@ -251,8 +251,14 @@ class AttentionTokenMixer(AbstractTokenMixer):
         q = jax.vmap(self.query_proj)(tokens).reshape(shape)
         k = jax.vmap(self.key_proj)(tokens).reshape(shape)
         v = jax.vmap(self.value_proj)(tokens).reshape(shape)
-        if self.backend == "linear":
-            attended = _linear_attention(q[None], k[None], v[None])[0]
+        if self.backend.startswith("linear"):
+            attended = _linear_attention(
+                q[None],
+                k[None],
+                v[None],
+                direct="direct" in self.backend,
+                mixed_precision="bf16" in self.backend,
+            )[0]
         elif self.backend == "cudnn":
             attended = _cudnn_attention(q[None], k[None], v[None], None, None)[0]
         else:
@@ -681,7 +687,7 @@ def build_mixer_equation(
     state_depth: int = 1,
     state_token_mixer: str = "mean",
     heads: int = 4,
-    attention_backend: Literal["xla", "cudnn", "linear"] = "xla",
+    attention_backend: str = "xla",
     hidden_ratio: int = 2,
     read: Callable[[Array], Array] = jnp.asarray,
     basis: AbstractDrawBasis | None = None,

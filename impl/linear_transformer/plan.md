@@ -75,3 +75,47 @@ reconstructs the appropriate algorithm during replay.
   Training job **66880252** submitted with the recorded baseline settings and
   two-hour limit. Output: `runs/refine-iteration-66880252/`; log:
   `slurm-66880252.out`. Training completion and quality comparison are pending.
+
+## Performance optimization ablation (2026-11-27)
+
+User authorized direct single-query contraction and mixed-precision attention
+operands, plus short probes. Keep `linear` unchanged for checkpoint replay.
+Add `linear-direct`, `linear-bf16`, and `linear-direct-bf16` backend selectors.
+Direct contraction applies only at query length one; state self-attention keeps
+associative summaries. BF16 modes cast dot operands, including intermediate
+summary/scores, to BF16 with explicit FP32 accumulation; feature maps, log-key
+weights, key sums, and normalization stay FP32. Model parameters stay FP32.
+
+Verification: single- and multi-query outputs and input/bias gradients against
+an independent explicit kernel, mapped execution, empty/fully masked memory,
+end-to-end rollout gradients, saved-backend checkpoint reconstruction, and
+existing softmax tests. GPU tests in progress; investigate any mismatch first.
+
+Probe runner: `experiments/refine_iteration/probe_linear_attention.py`.
+One allocation runs the four linear modes and a cuDNN timing control sequentially
+in fresh processes on the same GPU. Snapshot baseline metadata, load identical
+trained baseline weights, create fresh Adam state, retain the 10,000-step LR
+schedule, warm up 20 updates, and time five blocks of 20 updates. Seeds,
+episodes, horizons, batch/microbatch 32, and model architecture match across
+modes. Timings synchronize all returned arrays and exclude warm-up compilation.
+Record training peak memory before evaluation. Evaluate 16 held-out episodes at
+prefix 32 afterward. These are continuation/speed probes, not full retraining
+or quality proof; the cuDNN control starts from linear-trained weights.
+
+Status: implementation complete. GPU test job 66885140 passed 31 checks and
+found one overly strict BF16 batching assertion (maximum absolute discrepancy
+0.00025618; FP32-reference output and gradient checks passed). The batching
+assertion now uses BF16-aware tolerance. Final verification job 66885286 passed all 35 tests in 102.16 seconds.
+Performance ablation job: 66885309, all five variants finished after successful verification, with
+20-minute limit on spgpu. Artifacts: `runs/linear-opt-probe-66885286/`.
+Ruff, changed-file formatting, and diff whitespace checks passed.
+The harness baseline is not changed by this ablation.
+
+Final measurements, limitations, and recommendations are in
+`impl/linear_transformer/optimization-results.md`. Both optimization controls are
+implemented and verified; the harness baseline remains unchanged.
+
+User selected `linear-direct-bf16` as the default for new refine-iteration runs.
+Structured runs using this backend default to full-batch episode microbatching,
+matching the probes. Existing baseline metadata and saved backend choices stay
+unchanged.
