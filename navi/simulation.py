@@ -11,6 +11,22 @@ from jax import Array
 from .helper import DatasetSimulator, QueryContextKernel
 
 LOG2_VARIANCE_BOUNDS = (-2.0, 2.0)
+H2_BOUNDS = (0.05, 0.5)
+
+
+def sample_variances(key, prior="log2-uniform", dtype=jnp.float32, h2_bounds=H2_BOUNDS):
+    """Sample genetic and residual variance, preserving the legacy key mapping."""
+    if prior == "h2-uniform":
+        low, high = h2_bounds
+        if not 0 < low < high < 1:
+            raise ValueError("require 0 < h2_min < h2_max < 1")
+        genetic = jax.random.uniform(key, (), dtype, minval=low, maxval=high)
+        return jnp.stack((genetic, 1 - genetic))
+    if prior != "log2-uniform":
+        raise ValueError(f"unknown variance prior: {prior}")
+    return 2 ** jax.random.uniform(
+        key, (2,), dtype, minval=LOG2_VARIANCE_BOUNDS[0], maxval=LOG2_VARIANCE_BOUNDS[1]
+    )
 
 
 class SpectralFactors(NamedTuple):
@@ -90,8 +106,17 @@ class SimulatedTrait(NamedTuple):
     qr_diagonal: Array
 
 
-@partial(jax.jit, static_argnames=("n", "c", "q"))
-def simulate_trait(key: Array, eigenvalues: Array, *, n: int, c: int, q: int):
+@partial(jax.jit, static_argnames=("n", "c", "q", "prior", "h2_bounds"))
+def simulate_trait(
+    key: Array,
+    eigenvalues: Array,
+    *,
+    n: int,
+    c: int,
+    q: int,
+    prior="log2-uniform",
+    h2_bounds=H2_BOUNDS,
+):
     """Draw a basis, ordered selections and a phenotype for one episode."""
     basis_key, selection_key, variance_key, trait_key = jax.random.split(key, 4)
     gaussian = jax.random.normal(basis_key, (n, eigenvalues.size), eigenvalues.dtype)
@@ -100,13 +125,7 @@ def simulate_trait(key: Array, eigenvalues: Array, *, n: int, c: int, q: int):
     factors = SpectralFactors(basis * jnp.sign(diagonal), eigenvalues)
     selection = jax.random.permutation(selection_key, n).astype(jnp.int32)
     context, queries = selection[:c], selection[c : c + q]
-    variances = 2 ** jax.random.uniform(
-        variance_key,
-        (2,),
-        eigenvalues.dtype,
-        minval=LOG2_VARIANCE_BOUNDS[0],
-        maxval=LOG2_VARIANCE_BOUNDS[1],
-    )
+    variances = sample_variances(variance_key, prior, eigenvalues.dtype, h2_bounds)
     simulator = SpectralDatasetSimulator(factors, variances[0], variances[1])
     targets, observations = simulator.sample(trait_key, context, queries)
     return SimulatedTrait(
