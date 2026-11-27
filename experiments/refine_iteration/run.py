@@ -534,7 +534,7 @@ def parse_args(argv=None):
     parser.add_argument("--query-depth", type=int, default=2)
     parser.add_argument(
         "--attention-backend",
-        choices=("xla", "cudnn"),
+        choices=("xla", "cudnn", "linear"),
         help="defaults to cuDNN for structured runs on CUDA and XLA otherwise",
     )
     parser.add_argument(
