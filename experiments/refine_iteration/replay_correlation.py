@@ -25,6 +25,7 @@ from experiments.refine_iteration.run import (
     build_models,
     evaluate,
     sample_structured_episode,
+    structured_options,
 )
 from navi.distribution import FullSupportBarDistribution
 from navi.simulation import power_law_eigenvalues
@@ -42,7 +43,12 @@ def refresh_references(run, args, test, spectrum):
     for index in range(args.test_episodes):
         key, _ = jax.random.split(jax.random.fold_in(test, index))
         episode = sample_structured_episode(
-            key, spectrum, n=args.n, c=args.context_count, q=args.queries
+            key,
+            spectrum,
+            n=args.n,
+            c=args.context_count,
+            q=args.queries,
+            **structured_options(args),
         )
         targets = episode.inputs.targets
         oracle, _, oracle_mean, identity_mean, targets = jax.device_get(
@@ -51,9 +57,13 @@ def refresh_references(run, args, test, spectrum):
                     distribution,
                     episode.context_factor,
                     episode.query_factor,
-                    episode.inputs.observations[:, 0],
+                    episode.raw_observations,
                     targets,
                     return_means=True,
+                    prior=structured_options(args)["prior"],
+                    h2_bounds=structured_options(args)["h2_bounds"],
+                    centered=structured_options(args)["standardize"],
+                    scale=episode.scale,
                 ),
                 targets,
             )

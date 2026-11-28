@@ -7,13 +7,23 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.special import log_ndtr, logsumexp
 
-from navi.simulation import LOG2_VARIANCE_BOUNDS
+from navi.simulation import H2_BOUNDS, LOG2_VARIANCE_BOUNDS
 
 VARIANCE_GRID_SIZE = 32
 _HIGHEST = jax.lax.Precision.HIGHEST
 
 
-def _variance_grid(dtype):
+def _variance_grid(dtype, prior="log2-uniform", h2_bounds=H2_BOUNDS):
+    if prior == "h2-uniform":
+        low, high = h2_bounds
+        if not 0 < low < high < 1:
+            raise ValueError("require 0 < h2_min < h2_max < 1")
+        points = low + (jnp.arange(VARIANCE_GRID_SIZE**2, dtype=dtype) + 0.5) * (
+            (high - low) / VARIANCE_GRID_SIZE**2
+        )
+        return points, 1 - points
+    if prior != "log2-uniform":
+        raise ValueError(f"unknown variance prior: {prior}")
     low, high = LOG2_VARIANCE_BOUNDS
     log2_points = low + (jnp.arange(VARIANCE_GRID_SIZE, dtype=dtype) + 0.5) * (
         (high - low) / VARIANCE_GRID_SIZE
@@ -22,7 +32,9 @@ def _variance_grid(dtype):
     return jnp.repeat(points, points.size), jnp.tile(points, points.size)
 
 
-def _spectral_posterior(context_factor, query_factor, observations, genetic, residual):
+def _spectral_posterior(
+    context_factor, query_factor, observations, genetic, residual, *, centered=False
+):
     """Return marginal log likelihood and query means and variances across grid points."""
     transpose = context_factor.T
     gram = jnp.matmul(transpose, context_factor, precision=_HIGHEST)
@@ -43,7 +55,7 @@ def _spectral_posterior(context_factor, query_factor, observations, genetic, res
         posterior_variances, (rotated_queries**2).T, precision=_HIGHEST
     )
 
-    logdet = observations.size * jnp.log(residual)
+    logdet = (observations.size - int(centered)) * jnp.log(residual)
     logdet += jnp.sum(jnp.log1p(scaled_eigenvalues), axis=-1)
     explained = jnp.matmul(
         posterior_variances / residual[:, None], projected_y**2, precision=_HIGHEST
@@ -89,14 +101,20 @@ def paired_bar_scores(
     targets,
     *,
     return_means=False,
+    prior="log2-uniform",
+    h2_bounds=H2_BOUNDS,
+    centered=False,
+    scale=1.0,
 ):
     """Score the kernel posterior mixture and an identity-kernel variance plug-in."""
-    genetic, residual = _variance_grid(context_factor.dtype)
+    genetic, residual = _variance_grid(context_factor.dtype, prior, h2_bounds)
     evidence, means, variances = _spectral_posterior(
-        context_factor, query_factor, observations, genetic, residual
+        context_factor, query_factor, observations, genetic, residual, centered=centered
     )
     edges = jnp.asarray(distribution.edges, dtype=means.dtype)
-    component_logits = _normal_bar_log_masses(means, variances, edges)
+    component_logits = _normal_bar_log_masses(
+        means / scale, variances / scale**2, edges
+    )
     oracle_logits = logsumexp(
         jax.nn.log_softmax(evidence)[:, None, None] + component_logits, axis=0
     )
@@ -106,12 +124,13 @@ def paired_bar_scores(
     total_variance = genetic + residual
     y_squared = jnp.dot(observations, observations, precision=_HIGHEST)
     identity_evidence = -0.5 * (
-        observations.size * jnp.log(total_variance) + y_squared / total_variance
+        (observations.size - int(centered)) * jnp.log(total_variance)
+        + y_squared / total_variance
     )
     genetic_plugin = jnp.sum(jax.nn.softmax(identity_evidence) * genetic)
     query_self_kernel = jnp.sum(query_factor**2, axis=-1)
     identity_logits = _normal_bar_log_masses(
-        jnp.zeros_like(targets), genetic_plugin * query_self_kernel, edges
+        jnp.zeros_like(targets), genetic_plugin * query_self_kernel / scale**2, edges
     )
     scores = (
         distribution.loss(oracle_logits, targets),

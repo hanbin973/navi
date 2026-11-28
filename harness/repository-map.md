@@ -76,6 +76,10 @@ changing them.
   Select `--integrator` from running-mean, polynomial, averaging,
   sgd-momentum, adam, or schedule-free; gain and optimizer flags are recorded
   for checkpoint replay.
+  Online structured runs default to a fixed-total-variance h2-uniform prior
+  on [0.05, 0.5] and context standardization with an unknown intercept.
+  `--variance-prior log2-uniform --standardize off` restores legacy semantics.
+  Calibration, draws, features, Gaussian references, and replay share these settings.
   Select the state mixer and depth with `--state-token-mixer` and
   `--state-depth`. Structured replay supports version-9 checkpoints.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
@@ -98,6 +102,8 @@ changing them.
 - `tests/test_simulation.py`, `tests/test_simulation_data.py`, and
   `tests/test_structured_training.py` — spectral simulation, artifact
   validation, and online and dataset-backed training and evaluation.
+- `tests/test_standardization.py` — variance priors, centered draws, diffuse-intercept
+  dense reference, standardized scoring, calibration, and legacy compatibility.
 - `tests/test_navi_model.py` — predictor context reuse, input validation, and bar-distribution checks.
 
 ## Design notes
@@ -105,6 +111,8 @@ changing them.
 - `impl/improve_iteration/draft_improve_iteration.md` — separable mixer design,
   implementation plan, and verification record.
 
+- `impl/std_experiment/` — realistic heritability and standardized-input plan,
+  Slurm verification, and baseline-derived A/B/C submission commands.
 - `impl/modular_readout/` — readout component design and implementation plan.
 - `impl/attention_update/` — axial proposal design, implementation plan, and
   verification record.

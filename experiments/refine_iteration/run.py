@@ -62,6 +62,7 @@ from navi.integrator import (
     sgd,
 )
 from navi.simulation import (
+    H2_BOUNDS,
     LOG2_VARIANCE_BOUNDS,
     kernel_features,
     power_law_eigenvalues,
@@ -116,19 +117,46 @@ class StructuredEpisode(NamedTuple):
     context_factor: jax.Array
     query_factor: jax.Array
     draw_key: jax.Array
+    variances: jax.Array
+    scale: jax.Array
+    raw_observations: jax.Array
 
 
-@partial(jax.jit, static_argnames=("n", "c", "q"))
-def sample_structured_episode(key, spectrum, *, n, c, q):
+@partial(jax.jit, static_argnames=("n", "c", "q", "prior", "h2_bounds", "standardize"))
+def sample_structured_episode(
+    key,
+    spectrum,
+    *,
+    n,
+    c,
+    q,
+    prior="log2-uniform",
+    h2_bounds=H2_BOUNDS,
+    standardize=False,
+):
+    if standardize and c < 2:
+        raise ValueError("standardization requires at least two context observations")
     trait_key, draw_key = jax.random.split(key)
-    trait = simulate_trait(trait_key, spectrum, n=n, c=c, q=q)
+    trait = simulate_trait(
+        trait_key, spectrum, n=n, c=c, q=q, prior=prior, h2_bounds=h2_bounds
+    )
     context = selected_factor(trait.factors, trait.context)
     queries = selected_factor(trait.factors, trait.queries)
+    observations = trait.observations
+    scale = jnp.asarray(1, observations.dtype)
+    if standardize:
+        context = context - context.mean(axis=0, keepdims=True)
+        observations = observations - observations.mean()
+        scale = jnp.sqrt(jnp.sum(observations**2) / (c - 1))
     features = kernel_features(context, queries)
     valid_basis = jnp.all(jnp.isfinite(trait.qr_diagonal) & (trait.qr_diagonal != 0))
     targets = jnp.where(valid_basis, trait.targets, jnp.nan)
-    inputs = TrainingEpisode(trait.observations[:, None], *features, targets)
-    return StructuredEpisode(inputs, context, queries, draw_key)
+    inputs = TrainingEpisode(
+        (observations / scale)[:, None], *features, targets / scale
+    )
+    return StructuredEpisode(
+        inputs, context, queries, draw_key, trait.variances, scale, observations
+    )
 
 
 @partial(jax.jit, static_argnames=("length", "k"))
@@ -139,8 +167,20 @@ def structured_draws(context_factor, key, first, *, length, k):
     )
 
 
+def structured_options(args):
+    """Missing fields mean legacy semantics for existing checkpoints and callers."""
+    return {
+        "prior": getattr(args, "variance_prior", "log2-uniform"),
+        "h2_bounds": (
+            getattr(args, "h2_min", H2_BOUNDS[0]),
+            getattr(args, "h2_max", H2_BOUNDS[1]),
+        ),
+        "standardize": getattr(args, "standardize", "off") == "on",
+    }
+
+
 @partial(jax.jit, static_argnames=("n", "q"))
-def structured_calibration_targets(key, spectrum, *, n, q):
+def _legacy_calibration_targets(key, spectrum, *, n, q):
     variance_key, coefficient_key, direction_key = jax.random.split(key, 3)
     count, dtype = STRUCTURED_CALIBRATION_EPISODES, spectrum.dtype
     genetic = jnp.exp2(
@@ -157,6 +197,24 @@ def structured_calibration_targets(key, spectrum, *, n, q):
     # A Haar basis rotates each coefficient vector to a uniform direction at fixed radius.
     direction = jax.random.normal(direction_key, (count, n), dtype)
     return direction[:, :q] * (radius / jnp.linalg.norm(direction, axis=1))[:, None]
+
+
+def structured_calibration_targets(key, spectrum, *, n, q, c=None, **options):
+    if options.get("prior", "log2-uniform") == "log2-uniform" and not options.get(
+        "standardize", False
+    ):
+        return _legacy_calibration_targets(key, spectrum, n=n, q=q)
+    c = n - q if c is None else c
+    keys = jax.random.split(key, STRUCTURED_CALIBRATION_EPISODES)
+    # Sequential map bounds QR workspace independently of calibration episode count.
+    return jax.lax.map(
+        lambda k: (
+            sample_structured_episode(
+                k, spectrum, n=n, c=c, q=q, **options
+            ).inputs.targets
+        ),
+        keys,
+    )
 
 
 def _episode_batch_gradient(loss, models, keys, microbatch_size):
@@ -232,7 +290,12 @@ def make_train_chunk(optimizer, args, spectrum=None):
 
             def structured_loss(models, key):
                 episode = sample_structured_episode(
-                    key, spectrum, n=args.n, c=args.context_count, q=args.queries
+                    key,
+                    spectrum,
+                    n=args.n,
+                    c=args.context_count,
+                    q=args.queries,
+                    **structured_options(args),
                 )
                 draws = structured_draws(
                     episode.context_factor,
@@ -301,7 +364,12 @@ def evaluate(models, test_key, args, stored_split=None, spectrum=None):
                 jax.random.fold_in(test_key, episode_index)
             )
             structured = sample_structured_episode(
-                episode_key, spectrum, n=args.n, c=args.context_count, q=args.queries
+                episode_key,
+                spectrum,
+                n=args.n,
+                c=args.context_count,
+                q=args.queries,
+                **structured_options(args),
             )
             episode = structured.inputs
             context_factor, query_factor = (
@@ -335,9 +403,21 @@ def evaluate(models, test_key, args, stored_split=None, spectrum=None):
                 predictor.distribution,
                 context_factor,
                 query_factor,
-                observations[:, 0],
+                structured.raw_observations
+                if spectrum is not None
+                else observations[:, 0],
                 targets,
                 return_means=True,
+                **(
+                    {
+                        "prior": structured_options(args)["prior"],
+                        "h2_bounds": structured_options(args)["h2_bounds"],
+                        "centered": structured_options(args)["standardize"],
+                        "scale": structured.scale,
+                    }
+                    if spectrum is not None
+                    else {}
+                ),
             )
         )
         oracle_nll, identity_nll = float(oracle_nll), float(identity_nll)
@@ -388,6 +468,18 @@ def evaluate(models, test_key, args, stored_split=None, spectrum=None):
                 (scalars, prediction, carry.draw_count)
             )
             row = {
+                **(
+                    {
+                        "genetic_variance": float(structured.variances[0]),
+                        "residual_variance": float(structured.variances[1]),
+                        "h2": float(
+                            structured.variances[0] / structured.variances.sum()
+                        ),
+                        "scale": float(structured.scale),
+                    }
+                    if spectrum is not None
+                    else {}
+                ),
                 "episode": episode_index,
                 "t": target,
                 "draw_count": int(draw_count),
@@ -467,6 +559,11 @@ def write_evaluation(output, rows, t_max, bootstrap_seed):
                 "identity_nll": float(identity.mean()),
                 "nll_above_oracle": float(oracle_gap.mean()),
                 "identity_minus_oracle": float(kernel_gap.mean()),
+                "fraction_closed": float(
+                    (identity.mean() - scores.mean()) / kernel_gap.mean()
+                )
+                if abs(kernel_gap.mean()) > 1e-12
+                else None,
                 "nll_above_oracle_ci95": np.percentile(
                     oracle_gap[samples].mean(axis=1), [2.5, 97.5]
                 ).tolist(),
@@ -478,6 +575,29 @@ def write_evaluation(output, rows, t_max, bootstrap_seed):
                 ).tolist(),
             }
         )
+    if "h2" in rows[0]:
+        for record in summary:
+            prefix_rows = by_prefix[record["t"]]
+            h2 = np.array([row["h2"] for row in prefix_rows])
+            record["h2_quantiles"] = []
+            for indices in np.array_split(np.argsort(h2, kind="stable"), 5):
+                if not indices.size:
+                    continue
+                subset = [prefix_rows[index] for index in indices]
+                gap = np.mean([row["nll_above_oracle"] for row in subset])
+                span = np.mean([row["identity_minus_oracle"] for row in subset])
+                record["h2_quantiles"].append(
+                    {
+                        "episodes": int(indices.size),
+                        "h2_min": float(h2[indices].min()),
+                        "h2_max": float(h2[indices].max()),
+                        "nll_above_oracle": float(gap),
+                        "identity_minus_oracle": float(span),
+                        "fraction_closed": float(1 - gap / span)
+                        if abs(span) > 1e-12
+                        else None,
+                    }
+                )
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 
     fig, ax = plt.subplots(layout="constrained")
@@ -574,6 +694,10 @@ def parse_args(argv=None):
     parser.add_argument(
         "--alpha", type=float, help="structured power-law exponent (default 1.0)"
     )
+    parser.add_argument("--variance-prior", choices=("log2-uniform", "h2-uniform"))
+    parser.add_argument("--h2-min", type=float, default=H2_BOUNDS[0])
+    parser.add_argument("--h2-max", type=float, default=H2_BOUNDS[1])
+    parser.add_argument("--standardize", choices=("on", "off"))
     parser.add_argument("--eval-split", choices=("validation", "test"), default="test")
     parser.add_argument("--data-chunk-steps", type=int, default=1)
     parser.add_argument(
@@ -593,6 +717,16 @@ def parse_args(argv=None):
         parser.error("--sf-learning-rate must be finite and positive")
     if not 0 < args.sf_b1 < 1:
         parser.error("--sf-b1 must lie in (0, 1)")
+    if not 0 < args.h2_min < args.h2_max < 1:
+        parser.error("require 0 < --h2-min < --h2-max < 1")
+    if not args.structured and (
+        args.variance_prior is not None or args.standardize is not None
+    ):
+        parser.error("--variance-prior and --standardize require --structured")
+    args.variance_prior = args.variance_prior or (
+        "h2-uniform" if args.structured else "log2-uniform"
+    )
+    args.standardize = args.standardize or ("on" if args.structured else "off")
     if args.structured:
         args.n = 512 if args.n is None else args.n
         args.queries = 8 if args.queries is None else args.queries
@@ -615,6 +749,8 @@ def parse_args(argv=None):
             if getattr(args, name) is None:
                 setattr(args, name, default)
 
+    if args.standardize == "on" and args.context_count < 2:
+        parser.error("standardization requires at least two context observations")
     if args.state_depth < 0:
         parser.error("--state-depth must be nonnegative")
     for name, value in vars(args).items():
@@ -762,7 +898,12 @@ def run(args):
     bins, init, train, test, bootstrap = jax.random.split(jax.random.key(args.seed), 5)
     if spectrum is not None:
         calibration = structured_calibration_targets(
-            bins, spectrum, n=args.n, q=args.queries
+            bins,
+            spectrum,
+            n=args.n,
+            q=args.queries,
+            c=args.context_count,
+            **structured_options(args),
         )
         edges = np.quantile(np.asarray(calibration), np.linspace(0, 1, 33)).tolist()
     elif dataset is not None:
