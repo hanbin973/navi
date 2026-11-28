@@ -7,6 +7,11 @@ Use [the common Python launcher](slurm/python.sbatch) with
 repository root with a prepared uv environment. Put scheduler options before
 the launcher path and Python arguments after it.
 
+Run `sbatch` outside the sandbox using the execution tool's escalation flow
+(`sandbox_permissions="require_escalated"`). Sandboxed submissions cannot reach
+the Slurm controller and fail with a connection error; request escalation on
+the initial submission.
+
 The launcher defaults to `spgpu,gpu-rtx6000,gpu_mig40` for GPU jobs. Slurm can
 place the job on any of the three partitions. Set resources and the JAX
 backend on the submission command. Pass `--partition` explicitly when a job
