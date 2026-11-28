@@ -32,6 +32,14 @@ experiment package. Shared library APIs belong in `navi`; historical experiment
 code can be recovered from Git without restoring retired runners. Run
 `tests/test_experiment_dependencies.py` when changing experiment imports.
 
+## Harness baseline
+
+`harness/latest_baseline.json` designates run `66926518` as the baseline.
+Baseline-derived jobs use `--batch-size 8 --episode-microbatch-size 8`,
+`--variance-prior h2-uniform --h2-min 0.05 --h2-max 0.5`, and
+`--standardize on`. Preserve the recorded model and attention settings when
+reproducing this baseline.
+
 ## Refine-iteration defaults
 
 New refine-iteration runs default to `--attention-backend linear-direct-bf16`.
