@@ -179,6 +179,10 @@ def test_default_basis_evaluates_identity_tanh_and_constant():
         ["--draw-basis", "no-constant"],
         ["--row-basis", "identity", "--draw-basis", "identity-tanh"],
         ["--state-read", "tanh"],
+        ["--attention-backend", "linear"],
+        ["--attention-backend", "linear-direct"],
+        ["--attention-backend", "linear-bf16"],
+        ["--attention-backend", "linear-direct-bf16"],
     ],
 )
 def test_mixer_checkpoint_roundtrip(tmp_path, flags):

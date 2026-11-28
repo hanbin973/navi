@@ -41,7 +41,7 @@ changing them.
 - `navi/predictor.py` — context encoder and query decoder interfaces, readout
   components, and their composition into the bar predictor.
 - `navi/training.py` — draw-prefix selection and the training objective that composes updater and predictor.
-- `navi/blocks.py` — shared dense PFNs attention, MLP, Transformer blocks, and axial prefix encoding.
+- `navi/blocks.py` — shared softmax and normalized ELU+1 linear PFNs attention, MLP, Transformer blocks, and axial prefix encoding.
 - `navi/helper.py` — abstract query kernel and dataset simulator interfaces,
   Gaussian reference helpers, and model-independent training episode assembly.
 - `navi/simulation.py` — power-law spectral factors, joint Gaussian traits,
@@ -67,6 +67,8 @@ changing them.
   `python -m experiments.fixed_point.run` with `--integrator running-mean`
   (the default), `--integrator polynomial`, or `--integrator averaging`
   for polynomial updates with uniform iterate averaging.
+- `experiments/refine_iteration/probe_linear_attention.py` — same-GPU, fresh-process
+  attention contraction/precision ablation with synchronized timing and held-out checks.
 - `experiments/refine_iteration/` — mixer-equation training, prefix evaluation,
   dataset generation, and structured checkpoint replay using identity state
   read and running-mean integration. New runs default to identity, tanh, and constant
@@ -80,6 +82,7 @@ changing them.
   on [0.05, 0.5] and context standardization with an unknown intercept.
   `--variance-prior log2-uniform --standardize off` restores legacy semantics.
   Calibration, draws, features, Gaussian references, and replay share these settings.
+  New runs default to `linear-direct-bf16` attention.
   Select the state mixer and depth with `--state-token-mixer` and
   `--state-depth`. Structured replay supports version-9 checkpoints.
 - `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
@@ -107,6 +110,11 @@ changing them.
 - `tests/test_navi_model.py` — predictor context reuse, input validation, and bar-distribution checks.
 
 ## Design notes
+
+- `impl/linear_transformer/plan.md` — ELU+1 linear-attention experiment design,
+  baseline configuration, validation, and submission record.
+  `impl/linear_transformer/optimization-results.md` records the direct-contraction
+  and BF16 performance ablation.
 
 - `impl/improve_iteration/draft_improve_iteration.md` — separable mixer design,
   implementation plan, and verification record.

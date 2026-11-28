@@ -70,6 +70,7 @@ cat slurm-JOB_ID.out
 ```
 
 A successful mock job prints the message, the job ID, the repository working
-directory, and a CUDA device. If the sandbox blocks access to Slurm, retry the
-scheduler command through the execution tool's escalation flow. Follow
+directory, and a CUDA device. Run `sbatch` outside the sandbox through the
+execution tool's escalation flow (`sandbox_permissions="require_escalated"`)
+on the initial submission: the sandbox cannot reach the Slurm controller. Follow
 [cluster guidance](../cluster.md) for polling and resource limits.

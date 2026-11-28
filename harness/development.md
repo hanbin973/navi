@@ -24,3 +24,11 @@ submitted: inspect its final status and output.
 
 CI, type-checking, and coverage requirements are undecided. Add them when there
 is a project contract to enforce rather than assuming they already exist.
+
+## Refine-iteration defaults
+
+New refine-iteration runs default to `--attention-backend linear-direct-bf16`.
+Structured runs with this backend default to the full episode batch per
+microbatch, matching the optimized GPU probes; pass
+`--episode-microbatch-size` explicitly to limit memory. Explicit attention
+backend choices and saved checkpoint metadata remain authoritative.

@@ -42,6 +42,7 @@ from navi import (
     rollout_loss,
 )
 from navi.averaging import AveragedUpdate, UniformAverager
+from navi.blocks import ATTENTION_BACKENDS
 from navi.fixed_point import (
     ConstantFreeDrawBasis,
     FixedPointUpdate,
@@ -654,8 +655,9 @@ def parse_args(argv=None):
     parser.add_argument("--query-depth", type=int, default=2)
     parser.add_argument(
         "--attention-backend",
-        choices=("xla", "cudnn"),
-        help="defaults to cuDNN for structured runs on CUDA and XLA otherwise",
+        choices=ATTENTION_BACKENDS,
+        default="linear-direct-bf16",
+        help="attention implementation (default: linear-direct-bf16)",
     )
     parser.add_argument(
         "--readout",
@@ -672,7 +674,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--episode-microbatch-size",
         type=int,
-        help="episodes processed together in structured mode (default full batch with cuDNN, one with XLA)",
+        help="episodes processed together in structured mode (default full batch with cuDNN or linear-direct-bf16, one otherwise)",
     )
     parser.add_argument("--test-episodes", type=int)
     parser.add_argument("--t-max", type=int, default=32)
@@ -884,15 +886,11 @@ def run(args):
     elif args.structured:
         spectrum = jnp.asarray(power_law_eigenvalues(args.n, args.features, args.alpha))
     device = jax.devices()[0]
-    if args.attention_backend is None:
-        cuda = (
-            device.platform == "gpu"
-            and "cuda" in device.client.platform_version.lower()
-        )
-        args.attention_backend = "cudnn" if args.structured and cuda else "xla"
     if args.structured and args.episode_microbatch_size is None:
         args.episode_microbatch_size = (
-            args.batch_size if args.attention_backend == "cudnn" else 1
+            args.batch_size
+            if args.attention_backend in ("cudnn", "linear-direct-bf16")
+            else 1
         )
     args.output_dir.mkdir(parents=True, exist_ok=False)
     bins, init, train, test, bootstrap = jax.random.split(jax.random.key(args.seed), 5)
@@ -927,8 +925,12 @@ def run(args):
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "pre_norm": True,
         "attention_compute_dtype": "bfloat16"
-        if args.attention_backend == "cudnn"
+        if args.attention_backend == "cudnn" or "bf16" in args.attention_backend
         else "float32",
+        "linear_attention_accumulation_dtype": "float32"
+        if args.attention_backend.startswith("linear")
+        else None,
+        "linear_attention_direct_single_query": "direct" in args.attention_backend,
         "context_encoder": type(predictor.encoder).__name__,
         "query_decoder": type(predictor.decoder).__name__,
         "context_width": predictor.encoder.context_width,
