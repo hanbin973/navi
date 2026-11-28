@@ -6,8 +6,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from experiments.attention_proposal import benchmark as legacy
 from experiments.attention_proposal import run as runner
-from experiments.modular_bayes import run as legacy
 from navi.helper import TrainingEpisode
 from navi.simulation import (
     SpectralQueryContextKernel,

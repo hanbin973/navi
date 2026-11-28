@@ -17,7 +17,11 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from experiments.modular_bayes.run import (
+from experiments.refine_iteration.baselines import (
+    VARIANCE_GRID_SIZE,
+    paired_bar_scores,
+)
+from experiments.refine_iteration.benchmark import (
     _step_draws,
     checkpoints,
     make_learning_rate,
@@ -26,10 +30,6 @@ from experiments.modular_bayes.run import (
     sample_episode_with_factors,
     score_prefix,
     score_prefix_from_draws,
-)
-from experiments.refine_iteration.baselines import (
-    VARIANCE_GRID_SIZE,
-    paired_bar_scores,
 )
 from experiments.refine_iteration.correlation import (
     summarize_correlation,

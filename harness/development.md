@@ -25,6 +25,13 @@ submitted: inspect its final status and output.
 CI, type-checking, and coverage requirements are undecided. Add them when there
 is a project contract to enforce rather than assuming they already exist.
 
+## Experiment isolation
+
+Each experiment owns its benchmark helpers and must not import another
+experiment package. Shared library APIs belong in `navi`; historical experiment
+code can be recovered from Git without restoring retired runners. Run
+`tests/test_experiment_dependencies.py` when changing experiment imports.
+
 ## Refine-iteration defaults
 
 New refine-iteration runs default to `--attention-backend linear-direct-bf16`.

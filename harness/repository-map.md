@@ -62,11 +62,6 @@ changing them.
   correlation and prefix figures for posterior mean predictions.
 - `experiments/attention_proposal/replay_correlation.py` — Pearson figure
   generation from saved online structured checkpoints.
-- `experiments/fixed_point/` — fixed-point training, prefix evaluation,
-  dataset generation, and structured checkpoint replay. Run
-  `python -m experiments.fixed_point.run` with `--integrator running-mean`
-  (the default), `--integrator polynomial`, or `--integrator averaging`
-  for polynomial updates with uniform iterate averaging.
 - `experiments/refine_iteration/probe_linear_attention.py` — same-GPU, fresh-process
   attention contraction/precision ablation with synchronized timing and held-out checks.
 - `experiments/refine_iteration/` — mixer-equation training, prefix evaluation,
@@ -85,13 +80,14 @@ changing them.
   New runs default to `linear-direct-bf16` attention.
   Select the state mixer and depth with `--state-token-mixer` and
   `--state-depth`. Structured replay supports version-9 checkpoints.
-- `experiments/bayes_update/` — historical varying-kernel simulator, prefix training,
-  and held-out extrapolation evaluation. Replay from the original commit.
-- `experiments/modular_bayes/` — repeat of Bayesian-update run 66501322
-  using the modular API and plain recurrent context attention.
-  The runner is `python -m experiments.modular_bayes.run`.
-- `experiments/gp_experiment/` — historical fixed-context Gaussian episode simulation,
-  Navi training, and paired oracle evaluation. Replay from the original commit.
+- `experiments/attention_proposal/benchmark.py` and
+  `experiments/refine_iteration/benchmark.py` — experiment-local legacy episode
+  simulation, draw streaming, scoring, and learning-rate schedules recovered from
+  the parent of cleanup commit `c7f1c04`. Neither experiment imports its siblings.
+  Retired `bayes_update`, `fixed_point`, `modular_bayes`, and `gp_experiment`
+  runners are available in Git history.
+- `tests/test_experiment_dependencies.py` — prevents imports between experiment
+  packages so retiring one experiment cannot break another.
 - `tests/test_bayes_update.py` — integration, history, prefix loss, symmetry, and gradients.
 - `tests/test_fixed_point.py` — axial estimate and gradient parity, resumed
   rollouts, readout bounding, and gain scheduling.

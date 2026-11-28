@@ -19,7 +19,7 @@ def probe(options):
     import numpy as np
     import optax
 
-    from experiments.modular_bayes.run import make_learning_rate
+    from experiments.refine_iteration.benchmark import make_learning_rate
     from experiments.refine_iteration.run import (
         build_models,
         evaluate,

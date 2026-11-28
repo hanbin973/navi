@@ -21,11 +21,7 @@ from experiments.attention_proposal.baselines import (
     VARIANCE_GRID_SIZE,
     paired_bar_scores,
 )
-from experiments.attention_proposal.correlation import (
-    summarize_correlation,
-    write_correlation,
-)
-from experiments.modular_bayes.run import (
+from experiments.attention_proposal.benchmark import (
     _step_draws,
     checkpoints,
     make_learning_rate,
@@ -35,6 +31,10 @@ from experiments.modular_bayes.run import (
     score_prefix,
     score_prefix_from_draws,
     stream_chunk,
+)
+from experiments.attention_proposal.correlation import (
+    summarize_correlation,
+    write_correlation,
 )
 from navi import (
     AxialAttentionProposal,
