@@ -1,0 +1,642 @@
+[
+  {
+    "t": 1,
+    "draw_count": 32,
+    "nll": 0.5827357519883662,
+    "oracle_nll": 0.23859747120877728,
+    "identity_nll": 0.8889948460273445,
+    "nll_above_oracle": 0.34413828077958897,
+    "identity_minus_oracle": 0.6503973748185672,
+    "fraction_closed": 0.47087996645806157,
+    "nll_above_oracle_ci95": [
+      0.2903388934806571,
+      0.40017332475254075
+    ],
+    "identity_minus_oracle_ci95": [
+      0.5925525216240203,
+      0.7109973465558141
+    ],
+    "change_from_t_max_ci95": [
+      0.21111755927850026,
+      0.31274476628750564
+    ],
+    "h2_quantiles": [
+      {
+        "episodes": 26,
+        "h2_min": 0.06780461221933365,
+        "h2_max": 0.1590356081724167,
+        "nll_above_oracle": 0.25934794487861484,
+        "identity_minus_oracle": 0.5374575950778447,
+        "fraction_closed": 0.5174541261417076
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.16352523863315582,
+        "h2_max": 0.2504749000072479,
+        "nll_above_oracle": 0.21785578762109464,
+        "identity_minus_oracle": 0.5058503981966239,
+        "fraction_closed": 0.5693276344196646
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.2526765763759613,
+        "h2_max": 0.33150121569633484,
+        "nll_above_oracle": 0.2958541793318895,
+        "identity_minus_oracle": 0.5747269753080148,
+        "fraction_closed": 0.48522656488616756
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.3317313492298126,
+        "h2_max": 0.4046841561794281,
+        "nll_above_oracle": 0.3481399729847908,
+        "identity_minus_oracle": 0.806633862555027,
+        "fraction_closed": 0.5684039696993983
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.4060007929801941,
+        "h2_max": 0.4997156858444214,
+        "nll_above_oracle": 0.6098677963018417,
+        "identity_minus_oracle": 0.8406443291902542,
+        "fraction_closed": 0.27452339220643607
+      }
+    ]
+  },
+  {
+    "t": 2,
+    "draw_count": 64,
+    "nll": 0.48617528565227985,
+    "oracle_nll": 0.23859747120877728,
+    "identity_nll": 0.8889948460273445,
+    "nll_above_oracle": 0.24757781444350258,
+    "identity_minus_oracle": 0.6503973748185672,
+    "fraction_closed": 0.6193437673198388,
+    "nll_above_oracle_ci95": [
+      0.209933517909667,
+      0.28762585554650283
+    ],
+    "identity_minus_oracle_ci95": [
+      0.5925525216240203,
+      0.7109973465558141
+    ],
+    "change_from_t_max_ci95": [
+      0.13219642680487595,
+      0.19702015987131735
+    ],
+    "h2_quantiles": [
+      {
+        "episodes": 26,
+        "h2_min": 0.06780461221933365,
+        "h2_max": 0.1590356081724167,
+        "nll_above_oracle": 0.13719395433480924,
+        "identity_minus_oracle": 0.5374575950778447,
+        "fraction_closed": 0.7447352952283831
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.16352523863315582,
+        "h2_max": 0.2504749000072479,
+        "nll_above_oracle": 0.1464096508347071,
+        "identity_minus_oracle": 0.5058503981966239,
+        "fraction_closed": 0.7105672915220327
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.2526765763759613,
+        "h2_max": 0.33150121569633484,
+        "nll_above_oracle": 0.27541553114469236,
+        "identity_minus_oracle": 0.5747269753080148,
+        "fraction_closed": 0.5207889259120153
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.3317313492298126,
+        "h2_max": 0.4046841561794281,
+        "nll_above_oracle": 0.22846668154001237,
+        "identity_minus_oracle": 0.806633862555027,
+        "fraction_closed": 0.7167653229727549
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.4060007929801941,
+        "h2_max": 0.4997156858444214,
+        "nll_above_oracle": 0.45775182664394376,
+        "identity_minus_oracle": 0.8406443291902542,
+        "fraction_closed": 0.4554750317713193
+      }
+    ]
+  },
+  {
+    "t": 4,
+    "draw_count": 128,
+    "nll": 0.4164424152113497,
+    "oracle_nll": 0.23859747120877728,
+    "identity_nll": 0.8889948460273445,
+    "nll_above_oracle": 0.17784494400257245,
+    "identity_minus_oracle": 0.6503973748185672,
+    "fraction_closed": 0.7265595605268494,
+    "nll_above_oracle_ci95": [
+      0.13936477397801356,
+      0.2153777915154933
+    ],
+    "identity_minus_oracle_ci95": [
+      0.5925525216240203,
+      0.7109973465558141
+    ],
+    "change_from_t_max_ci95": [
+      0.06584298421512358,
+      0.12314145959680899
+    ],
+    "h2_quantiles": [
+      {
+        "episodes": 26,
+        "h2_min": 0.06780461221933365,
+        "h2_max": 0.1590356081724167,
+        "nll_above_oracle": 0.07586003152223733,
+        "identity_minus_oracle": 0.5374575950778447,
+        "fraction_closed": 0.8588539222126913
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.16352523863315582,
+        "h2_max": 0.2504749000072479,
+        "nll_above_oracle": 0.10486845557506268,
+        "identity_minus_oracle": 0.5058503981966239,
+        "fraction_closed": 0.7926887950490447
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.2526765763759613,
+        "h2_max": 0.33150121569633484,
+        "nll_above_oracle": 0.16414187676631486,
+        "identity_minus_oracle": 0.5747269753080148,
+        "fraction_closed": 0.7144002564376835
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.3317313492298126,
+        "h2_max": 0.4046841561794281,
+        "nll_above_oracle": 0.1653047600388527,
+        "identity_minus_oracle": 0.806633862555027,
+        "fraction_closed": 0.7950684099533747
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.4060007929801941,
+        "h2_max": 0.4997156858444214,
+        "nll_above_oracle": 0.38659617483615877,
+        "identity_minus_oracle": 0.8406443291902542,
+        "fraction_closed": 0.5401192140217668
+      }
+    ]
+  },
+  {
+    "t": 8,
+    "draw_count": 256,
+    "nll": 0.3748146729776636,
+    "oracle_nll": 0.23859747120877728,
+    "identity_nll": 0.8889948460273445,
+    "nll_above_oracle": 0.1362172017688863,
+    "identity_minus_oracle": 0.6503973748185672,
+    "fraction_closed": 0.7905631125788523,
+    "nll_above_oracle_ci95": [
+      0.10395833021757425,
+      0.16807078740384884
+    ],
+    "identity_minus_oracle_ci95": [
+      0.5925525216240203,
+      0.7109973465558141
+    ],
+    "change_from_t_max_ci95": [
+      0.031846680972375904,
+      0.07234599020157474
+    ],
+    "h2_quantiles": [
+      {
+        "episodes": 26,
+        "h2_min": 0.06780461221933365,
+        "h2_max": 0.1590356081724167,
+        "nll_above_oracle": 0.04377840172785979,
+        "identity_minus_oracle": 0.5374575950778447,
+        "fraction_closed": 0.9185453845497914
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.16352523863315582,
+        "h2_max": 0.2504749000072479,
+        "nll_above_oracle": 0.09502930709948906,
+        "identity_minus_oracle": 0.5058503981966239,
+        "fraction_closed": 0.8121395032241308
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.2526765763759613,
+        "h2_max": 0.33150121569633484,
+        "nll_above_oracle": 0.13355944993404242,
+        "identity_minus_oracle": 0.5747269753080148,
+        "fraction_closed": 0.7676123521738933
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.3317313492298126,
+        "h2_max": 0.4046841561794281,
+        "nll_above_oracle": 0.11413245350122452,
+        "identity_minus_oracle": 0.806633862555027,
+        "fraction_closed": 0.8585077334347111
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.4060007929801941,
+        "h2_max": 0.4997156858444214,
+        "nll_above_oracle": 0.3000377744436264,
+        "identity_minus_oracle": 0.8406443291902542,
+        "fraction_closed": 0.6430859472606731
+      }
+    ]
+  },
+  {
+    "t": 16,
+    "draw_count": 512,
+    "nll": 0.34086150501389056,
+    "oracle_nll": 0.23859747120877728,
+    "identity_nll": 0.8889948460273445,
+    "nll_above_oracle": 0.10226403380511329,
+    "identity_minus_oracle": 0.6503973748185672,
+    "fraction_closed": 0.842766841065986,
+    "nll_above_oracle_ci95": [
+      0.07337576639547479,
+      0.1303446331658051
+    ],
+    "identity_minus_oracle_ci95": [
+      0.5925525216240203,
+      0.7109973465558141
+    ],
+    "change_from_t_max_ci95": [
+      0.005526535378885456,
+      0.03200646782352122
+    ],
+    "h2_quantiles": [
+      {
+        "episodes": 26,
+        "h2_min": 0.06780461221933365,
+        "h2_max": 0.1590356081724167,
+        "nll_above_oracle": 0.021167267973606404,
+        "identity_minus_oracle": 0.5374575950778447,
+        "fraction_closed": 0.9606159292054649
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.16352523863315582,
+        "h2_max": 0.2504749000072479,
+        "nll_above_oracle": 0.09139666305138515,
+        "identity_minus_oracle": 0.5058503981966239,
+        "fraction_closed": 0.8193207648403209
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.2526765763759613,
+        "h2_max": 0.33150121569633484,
+        "nll_above_oracle": 0.09873993236284989,
+        "identity_minus_oracle": 0.5747269753080148,
+        "fraction_closed": 0.8281968019511665
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.3317313492298126,
+        "h2_max": 0.4046841561794281,
+        "nll_above_oracle": 0.08261502593755722,
+        "identity_minus_oracle": 0.806633862555027,
+        "fraction_closed": 0.8975805135729454
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.4060007929801941,
+        "h2_max": 0.4997156858444214,
+        "nll_above_oracle": 0.2212208092212677,
+        "identity_minus_oracle": 0.8406443291902542,
+        "fraction_closed": 0.73684375003831
+      }
+    ]
+  },
+  {
+    "t": 32,
+    "draw_count": 1024,
+    "nll": 0.3224363527260721,
+    "oracle_nll": 0.23859747120877728,
+    "identity_nll": 0.8889948460273445,
+    "nll_above_oracle": 0.0838388815172948,
+    "identity_minus_oracle": 0.6503973748185672,
+    "fraction_closed": 0.8710959103414552,
+    "nll_above_oracle_ci95": [
+      0.0588464094165829,
+      0.10749347719829525
+    ],
+    "identity_minus_oracle_ci95": [
+      0.5925525216240203,
+      0.7109973465558141
+    ],
+    "change_from_t_max_ci95": [
+      0.0,
+      0.0
+    ],
+    "h2_quantiles": [
+      {
+        "episodes": 26,
+        "h2_min": 0.06780461221933365,
+        "h2_max": 0.1590356081724167,
+        "nll_above_oracle": 0.02643416879268793,
+        "identity_minus_oracle": 0.5374575950778447,
+        "fraction_closed": 0.9508162708374058
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.16352523863315582,
+        "h2_max": 0.2504749000072479,
+        "nll_above_oracle": 0.08872828174095887,
+        "identity_minus_oracle": 0.5058503981966239,
+        "fraction_closed": 0.8245958052869413
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.2526765763759613,
+        "h2_max": 0.33150121569633484,
+        "nll_above_oracle": 0.082597648868194,
+        "identity_minus_oracle": 0.5747269753080148,
+        "fraction_closed": 0.8562836748285092
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.3317313492298126,
+        "h2_max": 0.4046841561794281,
+        "nll_above_oracle": 0.053598681390285494,
+        "identity_minus_oracle": 0.806633862555027,
+        "fraction_closed": 0.9335526514836474
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.4060007929801941,
+        "h2_max": 0.4997156858444214,
+        "nll_above_oracle": 0.16998588860034944,
+        "identity_minus_oracle": 0.8406443291902542,
+        "fraction_closed": 0.7977909530846566
+      }
+    ]
+  },
+  {
+    "t": 64,
+    "draw_count": 2048,
+    "nll": 0.3105562204727903,
+    "oracle_nll": 0.23859747120877728,
+    "identity_nll": 0.8889948460273445,
+    "nll_above_oracle": 0.07195874926401302,
+    "identity_minus_oracle": 0.6503973748185672,
+    "fraction_closed": 0.8893618700658402,
+    "nll_above_oracle_ci95": [
+      0.0489051456519519,
+      0.095153606342501
+    ],
+    "identity_minus_oracle_ci95": [
+      0.5925525216240203,
+      0.7109973465558141
+    ],
+    "change_from_t_max_ci95": [
+      -0.021982010087231173,
+      -0.0019367754983250058
+    ],
+    "h2_quantiles": [
+      {
+        "episodes": 26,
+        "h2_min": 0.06780461221933365,
+        "h2_max": 0.1590356081724167,
+        "nll_above_oracle": 0.029383902366344746,
+        "identity_minus_oracle": 0.5374575950778447,
+        "fraction_closed": 0.9453279614327734
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.16352523863315582,
+        "h2_max": 0.2504749000072479,
+        "nll_above_oracle": 0.07196489549600162,
+        "identity_minus_oracle": 0.5058503981966239,
+        "fraction_closed": 0.857734824856204
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.2526765763759613,
+        "h2_max": 0.33150121569633484,
+        "nll_above_oracle": 0.060573805983249955,
+        "identity_minus_oracle": 0.5747269753080148,
+        "fraction_closed": 0.8946042058478524
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.3317313492298126,
+        "h2_max": 0.4046841561794281,
+        "nll_above_oracle": 0.052338957488536834,
+        "identity_minus_oracle": 0.806633862555027,
+        "fraction_closed": 0.9351143561928429
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.4060007929801941,
+        "h2_max": 0.4997156858444214,
+        "nll_above_oracle": 0.14769033074378968,
+        "identity_minus_oracle": 0.8406443291902542,
+        "fraction_closed": 0.8243129399492274
+      }
+    ]
+  },
+  {
+    "t": 128,
+    "draw_count": 4096,
+    "nll": 0.30141159845516086,
+    "oracle_nll": 0.23859747120877728,
+    "identity_nll": 0.8889948460273445,
+    "nll_above_oracle": 0.06281412724638358,
+    "identity_minus_oracle": 0.6503973748185672,
+    "fraction_closed": 0.9034219237679026,
+    "nll_above_oracle_ci95": [
+      0.04227673859859351,
+      0.08334002652554771
+    ],
+    "identity_minus_oracle_ci95": [
+      0.5925525216240203,
+      0.7109973465558141
+    ],
+    "change_from_t_max_ci95": [
+      -0.03447847260395065,
+      -0.0076875215192558286
+    ],
+    "h2_quantiles": [
+      {
+        "episodes": 26,
+        "h2_min": 0.06780461221933365,
+        "h2_max": 0.1590356081724167,
+        "nll_above_oracle": 0.02914864971087529,
+        "identity_minus_oracle": 0.5374575950778447,
+        "fraction_closed": 0.9457656753242952
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.16352523863315582,
+        "h2_max": 0.2504749000072479,
+        "nll_above_oracle": 0.04660717856425505,
+        "identity_minus_oracle": 0.5058503981966239,
+        "fraction_closed": 0.9078637108314802
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.2526765763759613,
+        "h2_max": 0.33150121569633484,
+        "nll_above_oracle": 0.05867166358690996,
+        "identity_minus_oracle": 0.5747269753080148,
+        "fraction_closed": 0.8979138510847418
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.3317313492298126,
+        "h2_max": 0.4046841561794281,
+        "nll_above_oracle": 0.047667154371738435,
+        "identity_minus_oracle": 0.806633862555027,
+        "fraction_closed": 0.94090608318779
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.4060007929801941,
+        "h2_max": 0.4997156858444214,
+        "nll_above_oracle": 0.13413658559322358,
+        "identity_minus_oracle": 0.8406443291902542,
+        "fraction_closed": 0.8404359835241738
+      }
+    ]
+  },
+  {
+    "t": 256,
+    "draw_count": 8192,
+    "nll": 0.29823932773433626,
+    "oracle_nll": 0.23859747120877728,
+    "identity_nll": 0.8889948460273445,
+    "nll_above_oracle": 0.05964185652555898,
+    "identity_minus_oracle": 0.6503973748185672,
+    "fraction_closed": 0.9082993584618996,
+    "nll_above_oracle_ci95": [
+      0.038916825216438154,
+      0.08132881464407546
+    ],
+    "identity_minus_oracle_ci95": [
+      0.5925525216240203,
+      0.7109973465558141
+    ],
+    "change_from_t_max_ci95": [
+      -0.03952882112062071,
+      -0.009690683413646185
+    ],
+    "h2_quantiles": [
+      {
+        "episodes": 26,
+        "h2_min": 0.06780461221933365,
+        "h2_max": 0.1590356081724167,
+        "nll_above_oracle": 0.030297343547527607,
+        "identity_minus_oracle": 0.5374575950778447,
+        "fraction_closed": 0.9436284018962661
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.16352523863315582,
+        "h2_max": 0.2504749000072479,
+        "nll_above_oracle": 0.03579547714728575,
+        "identity_minus_oracle": 0.5058503981966239,
+        "fraction_closed": 0.9292370288233478
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.2526765763759613,
+        "h2_max": 0.33150121569633484,
+        "nll_above_oracle": 0.050493959624033705,
+        "identity_minus_oracle": 0.5747269753080148,
+        "fraction_closed": 0.9121427011548008
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.3317313492298126,
+        "h2_max": 0.4046841561794281,
+        "nll_above_oracle": 0.046673602759838104,
+        "identity_minus_oracle": 0.806633862555027,
+        "fraction_closed": 0.9421378088294005
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.4060007929801941,
+        "h2_max": 0.4997156858444214,
+        "nll_above_oracle": 0.1374424511194229,
+        "identity_minus_oracle": 0.8406443291902542,
+        "fraction_closed": 0.8365034458130306
+      }
+    ]
+  },
+  {
+    "t": 512,
+    "draw_count": 16384,
+    "nll": 0.2984922386240214,
+    "oracle_nll": 0.23859747120877728,
+    "identity_nll": 0.8889948460273445,
+    "nll_above_oracle": 0.05989476741524413,
+    "identity_minus_oracle": 0.6503973748185672,
+    "fraction_closed": 0.9079105025109423,
+    "nll_above_oracle_ci95": [
+      0.039708598700235596,
+      0.08079909770749509
+    ],
+    "identity_minus_oracle_ci95": [
+      0.5925525216240203,
+      0.7109973465558141
+    ],
+    "change_from_t_max_ci95": [
+      -0.04014089129341301,
+      -0.008298890976584535
+    ],
+    "h2_quantiles": [
+      {
+        "episodes": 26,
+        "h2_min": 0.06780461221933365,
+        "h2_max": 0.1590356081724167,
+        "nll_above_oracle": 0.03762358255111254,
+        "identity_minus_oracle": 0.5374575950778447,
+        "fraction_closed": 0.9299971143850647
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.16352523863315582,
+        "h2_max": 0.2504749000072479,
+        "nll_above_oracle": 0.031334811105177954,
+        "identity_minus_oracle": 0.5058503981966239,
+        "fraction_closed": 0.9380551814985463
+      },
+      {
+        "episodes": 26,
+        "h2_min": 0.2526765763759613,
+        "h2_max": 0.33150121569633484,
+        "nll_above_oracle": 0.052554029111678786,
+        "identity_minus_oracle": 0.5747269753080148,
+        "fraction_closed": 0.9085582696313961
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.3317313492298126,
+        "h2_max": 0.4046841561794281,
+        "nll_above_oracle": 0.04683978110551834,
+        "identity_minus_oracle": 0.806633862555027,
+        "fraction_closed": 0.9419317942379055
+      },
+      {
+        "episodes": 25,
+        "h2_min": 0.4060007929801941,
+        "h2_max": 0.4997156858444214,
+        "nll_above_oracle": 0.13344850838184358,
+        "identity_minus_oracle": 0.8406443291902542,
+        "fraction_closed": 0.8412544952151321
+      }
+    ]
+  }
+]
